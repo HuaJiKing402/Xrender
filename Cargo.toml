@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/renderer-core",
     "crates/app-desktop",
+    "crates/app-web",
+    "crates/app-android",
+    "crates/app-apple",
 ]
 default-members = [
     "crates/renderer-core",

@@ -1,0 +1,9 @@
+name: CrossRender
+targets:
+  CrossRender:
+    type: executable
+    platform: macOS
+    sources:
+      - ../../crates/app-apple/src/main.rs
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: dev.crossrender.app

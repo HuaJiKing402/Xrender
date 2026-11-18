@@ -65,7 +65,12 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
 
         let renderer =
-            match pollster::block_on(Renderer::new(instance, surface, (size.width, size.height))) {
+            match pollster::block_on(Renderer::new(
+                instance,
+                surface,
+                (size.width, size.height),
+                backend::BACKENDS,
+            )) {
                 Ok(renderer) => renderer,
                 Err(error) => {
                     self.fail(

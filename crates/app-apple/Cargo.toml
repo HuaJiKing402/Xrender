@@ -1,0 +1,14 @@
+[package]
+name = "app-apple"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+renderer-core = { path = "../renderer-core" }
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true

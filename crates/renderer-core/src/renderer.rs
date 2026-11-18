@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use anyhow::{anyhow, Context, Result};
 use wgpu::util::DeviceExt;
 
-use crate::backend::{BACKENDS, BACKEND_LABEL};
+use crate::backend::BACKEND_LABEL;
 
 const SHADER_SOURCE: &str = include_str!("shaders/triangle.wgsl");
 
@@ -46,12 +46,13 @@ impl Renderer {
         instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
         size: (u32, u32),
+        backends: wgpu::Backends,
     ) -> Result<Self> {
-        let adapter_count = instance.enumerate_adapters(BACKENDS).await.len();
+        let adapter_count = instance.enumerate_adapters(backends).await.len();
         if adapter_count == 0 {
             return Err(anyhow!(
-                "no {} adapter found. Install or update your Vulkan driver.",
-                BACKEND_LABEL
+                "no {} adapter found. Install or update your GPU driver.",
+                crate::backend::label(backends)
             ));
         }
         let adapter = instance
@@ -61,7 +62,7 @@ impl Renderer {
                 ..Default::default()
             })
             .await
-            .context("failed to request a compatible Vulkan adapter")?;
+            .context("failed to request a compatible GPU adapter")?;
 
         let adapter_name = adapter.get_info().name;
         log::info!("adapter: {adapter_name}");

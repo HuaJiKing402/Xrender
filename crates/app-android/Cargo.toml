@@ -1,0 +1,17 @@
+[package]
+name = "app-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+renderer-core = { path = "../renderer-core" }
+wgpu.workspace = true
+raw-window-handle.workspace = true
+pollster.workspace = true
+anyhow.workspace = true
+log.workspace = true
+android-activity = { version = "0.6", features = ["game-activity"] }
