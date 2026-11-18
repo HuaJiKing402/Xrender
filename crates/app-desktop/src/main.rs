@@ -1,7 +1,7 @@
 use std::{env, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use renderer_core::{backend, Renderer};
+use renderer_core::{backend, model, Renderer};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -11,15 +11,21 @@ use winit::{
 };
 
 fn max_frames_from_env() -> Option<u32> {
-    env::var("TRIANGLE_MAX_FRAMES")
+    env::var("MAX_FRAMES")
+        .or_else(|_| env::var("TRIANGLE_MAX_FRAMES"))
         .ok()
         .and_then(|value| value.parse().ok())
+}
+
+fn model_path_from_args_or_env() -> Option<String> {
+    env::args().nth(1).or_else(|| env::var("MODEL_PATH").ok())
 }
 
 #[derive(Default)]
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    model_path: Option<String>,
     max_frames: Option<u32>,
     frame_count: u32,
     error: Option<String>,
@@ -64,11 +70,32 @@ impl ApplicationHandler for App {
         };
         let size = window.inner_size();
 
-        let renderer = match pollster::block_on(Renderer::new(
+        let mesh = match &self.model_path {
+            Some(path) => match model::load_from_path(path) {
+                Ok(mesh) => mesh,
+                Err(error) => {
+                    self.fail(
+                        event_loop,
+                        format!("failed to load model {path}: {error:#}"),
+                    );
+                    return;
+                }
+            },
+            None => model::Mesh::triangle(),
+        };
+        println!(
+            "Model: {} ({} vertices, {} triangles)",
+            mesh.name,
+            mesh.vertex_count(),
+            mesh.triangle_count()
+        );
+
+        let renderer = match pollster::block_on(Renderer::new_with_mesh(
             instance,
             surface,
             (size.width, size.height),
             backend::BACKENDS,
+            mesh,
         )) {
             Ok(renderer) => renderer,
             Err(error) => {
@@ -141,6 +168,7 @@ fn main() -> Result<()> {
     env_logger::init();
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     let mut app = App {
+        model_path: model_path_from_args_or_env(),
         max_frames: max_frames_from_env(),
         ..Default::default()
     };

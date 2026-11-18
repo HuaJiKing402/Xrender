@@ -4,26 +4,40 @@
 
 ## 当前状态
 
-- `renderer-core`：平台无关渲染内核，负责 Instance/Adapter/Device、交换链配置、WGSL 图形管线、帧呈现。
-- `app-desktop`：Windows/Linux 桌面入口，已在本机验证可渲染三角形。
+- `renderer-core`：平台无关渲染内核，负责 Instance/Adapter/Device、交换链配置、WGSL 网格管线、模型导入与帧呈现。
+- `app-desktop`：Windows/Linux 桌面入口，已在本机验证可渲染内置三角形、OBJ 立方体与 glTF 三角形。
 - `app-web` / `app-android` / `app-apple`：Web、Android、Apple 平台脚手架（代码与配置齐全，未在本机验证）。
+- `models/`：示例模型 `cube.obj` 与 `triangle.gltf`。
 
 ## 快速开始（Windows 桌面）
 
 ```bash
-TRIANGLE_MAX_FRAMES=5 cargo run -p app-desktop
+MAX_FRAMES=5 cargo run -p app-desktop
 ```
 
 预期输出：
 
 ```text
+Model: builtin-triangle (3 vertices, 1 triangles)
 Backend: Vulkan
 Adapter: AMD Radeon RX 5700 XT
 Window: 800x600
 rendered 5 frames
 ```
 
-窗口中出现一个粉红/渐变三角形。按 Esc 或关闭窗口退出；设置 `TRIANGLE_MAX_FRAMES` 后自动退出，便于 CI/脚本验证。
+窗口中出现一个粉红/渐变三角形。按 Esc 或关闭窗口退出；设置 `MAX_FRAMES`（旧变量 `TRIANGLE_MAX_FRAMES` 仍兼容）后自动退出，便于 CI/脚本验证。
+
+## 导入自定义模型
+
+支持 `.obj`、`.gltf`、`.glb`，可用命令行参数或 `MODEL_PATH` 环境变量：
+
+```bash
+MODEL_PATH=models/cube.obj MAX_FRAMES=5 cargo run -p app-desktop
+MODEL_PATH=models/triangle.gltf MAX_FRAMES=5 cargo run -p app-desktop
+cargo run -p app-desktop -- path/to/your_model.glb
+```
+
+输出会显示模型名、顶点数与三角形数。模型会自动居中并缩放到单位尺寸，带简单方向光着色与旋转相机动画。未提供模型时使用内置三角形回退。
 
 ## 设计原则
 

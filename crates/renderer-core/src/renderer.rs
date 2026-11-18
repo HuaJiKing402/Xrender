@@ -1,33 +1,22 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, time::Instant};
 
 use anyhow::{anyhow, Context, Result};
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-use crate::backend::BACKEND_LABEL;
+use crate::{
+    backend::BACKEND_LABEL,
+    model::{Mesh, MeshVertex},
+};
 
-const SHADER_SOURCE: &str = include_str!("shaders/triangle.wgsl");
+const SHADER_SOURCE: &str = include_str!("shaders/triangles.wgsl");
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 2],
-    color: [f32; 3],
+struct Uniforms {
+    mvp: [[f32; 4]; 4],
+    model: [[f32; 4]; 4],
 }
-
-const VERTICES: [Vertex; 3] = [
-    Vertex {
-        position: [0.0, 0.5],
-        color: [0.98, 0.44, 0.52],
-    },
-    Vertex {
-        position: [-0.5, -0.5],
-        color: [0.30, 0.70, 1.00],
-    },
-    Vertex {
-        position: [0.5, -0.5],
-        color: [1.00, 0.86, 0.35],
-    },
-];
 
 /// 平台无关的渲染器：接收一个已经创建好的 surface，负责设备、管线与帧呈现。
 pub struct Renderer {
@@ -38,16 +27,41 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    uniform_buffer: wgpu::Buffer,
     vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    model_name: String,
+    start: Instant,
 }
 
 impl Renderer {
+    /// 使用内置三角形创建渲染器。
     pub async fn new(
         instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
         size: (u32, u32),
         backends: wgpu::Backends,
     ) -> Result<Self> {
+        Self::new_with_mesh(instance, surface, size, backends, Mesh::triangle()).await
+    }
+
+    /// 使用自定义网格创建渲染器。
+    pub async fn new_with_mesh(
+        instance: wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        size: (u32, u32),
+        backends: wgpu::Backends,
+        mesh: Mesh,
+    ) -> Result<Self> {
+        if !mesh.indices.len().is_multiple_of(3) {
+            return Err(anyhow!("mesh index count must be a multiple of 3"));
+        }
+        if mesh.indices.is_empty() {
+            return Err(anyhow!("mesh has no indices"));
+        }
+
         let adapter_count = instance.enumerate_adapters(backends).await.len();
         if adapter_count == 0 {
             return Err(anyhow!(
@@ -70,7 +84,7 @@ impl Renderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
-            .context("failed to request Vulkan device")?;
+            .context("failed to request GPU device")?;
 
         let capabilities = surface.get_capabilities(&adapter);
         let format = capabilities
@@ -88,35 +102,70 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("triangle.wgsl"),
+            label: Some("triangles.wgsl"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
         });
 
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mesh uniforms"),
+            size: std::mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mesh bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mesh bind group"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("triangle pipeline layout"),
-            bind_group_layouts: &[],
+            label: Some("mesh pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
             ..Default::default()
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("triangle pipeline"),
+            label: Some("mesh pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    array_stride: std::mem::size_of::<MeshVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
                         wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
+                            format: wgpu::VertexFormat::Float32x3,
                             offset: 0,
                             shader_location: 0,
                         },
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Float32x3,
-                            offset: 8,
+                            offset: 12,
                             shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 24,
+                            shader_location: 2,
                         },
                     ],
                 })],
@@ -140,9 +189,14 @@ impl Renderer {
         });
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("triangle vertices"),
-            contents: bytemuck::cast_slice(&VERTICES),
+            label: Some("mesh vertices"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
             usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
         });
 
         Ok(Self {
@@ -153,7 +207,13 @@ impl Renderer {
             surface,
             config,
             pipeline,
+            bind_group,
+            uniform_buffer,
             vertex_buffer,
+            index_buffer,
+            index_count: mesh.indices.len() as u32,
+            model_name: mesh.name,
+            start: Instant::now(),
         })
     }
 
@@ -170,6 +230,19 @@ impl Renderer {
     }
 
     pub fn render_frame(&mut self) -> Result<()> {
+        let elapsed = self.start.elapsed().as_secs_f32();
+        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+        let model = Mat4::from_rotation_y(elapsed * 0.9) * Mat4::from_rotation_x(elapsed * 0.35);
+        let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.4), Vec3::ZERO, Vec3::Y);
+        let projection = Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 100.0);
+        let mvp = projection * view * model;
+        let uniforms = Uniforms {
+            mvp: mvp.to_cols_array_2d(),
+            model: model.to_cols_array_2d(),
+        };
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -188,7 +261,7 @@ impl Renderer {
             }
         };
 
-        let view = frame
+        let view_texture = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
@@ -199,9 +272,9 @@ impl Renderer {
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("triangle pass"),
+                label: Some("mesh pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &view_texture,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -217,8 +290,10 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.draw(0..3, 0..1);
+            pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.index_count, 0, 0..1);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -232,6 +307,14 @@ impl Renderer {
 
     pub fn adapter_name(&self) -> &str {
         &self.adapter_name
+    }
+
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    pub fn triangle_count(&self) -> u32 {
+        self.index_count / 3
     }
 
     pub fn instance(&self) -> &wgpu::Instance {

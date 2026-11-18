@@ -9,6 +9,8 @@ wgpu.workspace = true
 anyhow.workspace = true
 log.workspace = true
 bytemuck.workspace = true
+glam.workspace = true
+gltf.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true
