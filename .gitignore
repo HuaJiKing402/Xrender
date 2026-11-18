@@ -1,0 +1,3 @@
+/target/
+platforms/web/pkg/
+*.log

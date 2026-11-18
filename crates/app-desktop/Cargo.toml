@@ -1,0 +1,13 @@
+[package]
+name = "app-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+renderer-core = { path = "../renderer-core" }
+winit.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+pollster.workspace = true
