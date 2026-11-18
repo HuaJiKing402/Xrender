@@ -1,0 +1,239 @@
+use std::borrow::Cow;
+
+use anyhow::{anyhow, Context, Result};
+use wgpu::util::DeviceExt;
+
+use crate::backend::{BACKENDS, BACKEND_LABEL};
+
+const SHADER_SOURCE: &str = include_str!("shaders/triangle.wgsl");
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 2],
+    color: [f32; 3],
+}
+
+const VERTICES: [Vertex; 3] = [
+    Vertex {
+        position: [0.0, 0.5],
+        color: [0.98, 0.44, 0.52],
+    },
+    Vertex {
+        position: [-0.5, -0.5],
+        color: [0.30, 0.70, 1.00],
+    },
+    Vertex {
+        position: [0.5, -0.5],
+        color: [1.00, 0.86, 0.35],
+    },
+];
+
+/// 平台无关的渲染器：接收一个已经创建好的 surface，负责设备、管线与帧呈现。
+pub struct Renderer {
+    instance: wgpu::Instance,
+    adapter_name: String,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    vertex_buffer: wgpu::Buffer,
+}
+
+impl Renderer {
+    pub async fn new(
+        instance: wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        size: (u32, u32),
+    ) -> Result<Self> {
+        let adapter_count = instance.enumerate_adapters(BACKENDS).await.len();
+        if adapter_count == 0 {
+            return Err(anyhow!(
+                "no {} adapter found. Install or update your Vulkan driver.",
+                BACKEND_LABEL
+            ));
+        }
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            })
+            .await
+            .context("failed to request a compatible Vulkan adapter")?;
+
+        let adapter_name = adapter.get_info().name;
+        log::info!("adapter: {adapter_name}");
+
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .context("failed to request Vulkan device")?;
+
+        let capabilities = surface.get_capabilities(&adapter);
+        let format = capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(|format| format.is_srgb())
+            .or_else(|| capabilities.formats.first().copied())
+            .ok_or_else(|| anyhow!("surface has no supported texture format"))?;
+
+        let mut config = surface
+            .get_default_config(&adapter, size.0.max(1), size.1.max(1))
+            .ok_or_else(|| anyhow!("surface has no supported default configuration"))?;
+        config.format = format;
+        surface.configure(&device, &config);
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("triangle.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("triangle pipeline layout"),
+            bind_group_layouts: &[],
+            ..Default::default()
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("triangle pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 8,
+                            shader_location: 1,
+                        },
+                    ],
+                })],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("triangle vertices"),
+            contents: bytemuck::cast_slice(&VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        Ok(Self {
+            instance,
+            adapter_name,
+            device,
+            queue,
+            surface,
+            config,
+            pipeline,
+            vertex_buffer,
+        })
+    }
+
+    pub fn resize(&mut self, size: (u32, u32)) {
+        if size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        if self.config.width == size.0 && self.config.height == size.1 {
+            return;
+        }
+        self.config.width = size.0;
+        self.config.height = size.1;
+        self.surface.configure(&self.device, &self.config);
+    }
+
+    pub fn render_frame(&mut self) -> Result<()> {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &self.config);
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                return Err(anyhow!("Vulkan surface lost; recreate the window/surface"));
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err(anyhow!("surface validation error"));
+            }
+        };
+
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame encoder"),
+            });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("triangle pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.02,
+                            g: 0.02,
+                            b: 0.06,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            pass.draw(0..3, 0..1);
+        }
+
+        self.queue.submit(Some(encoder.finish()));
+        self.queue.present(frame);
+        Ok(())
+    }
+
+    pub fn backend_label() -> &'static str {
+        BACKEND_LABEL
+    }
+
+    pub fn adapter_name(&self) -> &str {
+        &self.adapter_name
+    }
+
+    pub fn instance(&self) -> &wgpu::Instance {
+        &self.instance
+    }
+}
