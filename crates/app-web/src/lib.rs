@@ -52,7 +52,9 @@ pub async fn init(canvas_id: &str) -> Result<(), JsValue> {
 pub fn render_frame() -> Result<(), JsValue> {
     RENDERER.with(|slot| {
         let mut slot = slot.borrow_mut();
-        let renderer = slot.as_mut().ok_or_else(|| js_error("renderer not initialized"))?;
+        let renderer = slot
+            .as_mut()
+            .ok_or_else(|| js_error("renderer not initialized"))?;
         renderer.render_frame().map_err(js_error)
     })
 }

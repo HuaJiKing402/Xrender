@@ -16,7 +16,8 @@ pub extern "C" fn android_main(app: AndroidApp) {
         app.poll_events(Some(Duration::from_millis(16)), |event| match event {
             PollEvent::Main(MainEvent::Terminated { .. }) => exit = true,
             PollEvent::Main(MainEvent::NativeWindowResized { .. }) => {
-                if let (Some(native), Some(renderer)) = (app.native_window().as_ref(), &mut renderer)
+                if let (Some(native), Some(renderer)) =
+                    (app.native_window().as_ref(), &mut renderer)
                 {
                     renderer.resize((native.width() as u32, native.height() as u32));
                 }

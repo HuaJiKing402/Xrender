@@ -64,22 +64,21 @@ impl ApplicationHandler for App {
         };
         let size = window.inner_size();
 
-        let renderer =
-            match pollster::block_on(Renderer::new(
-                instance,
-                surface,
-                (size.width, size.height),
-                backend::BACKENDS,
-            )) {
-                Ok(renderer) => renderer,
-                Err(error) => {
-                    self.fail(
-                        event_loop,
-                        format!("renderer initialization failed: {error:#}"),
-                    );
-                    return;
-                }
-            };
+        let renderer = match pollster::block_on(Renderer::new(
+            instance,
+            surface,
+            (size.width, size.height),
+            backend::BACKENDS,
+        )) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                self.fail(
+                    event_loop,
+                    format!("renderer initialization failed: {error:#}"),
+                );
+                return;
+            }
+        };
 
         println!("Backend: {}", backend::BACKEND_LABEL);
         println!("Adapter: {}", renderer.adapter_name());
