@@ -1,3 +1,9 @@
 /target/
 platforms/web/pkg/
 *.log
+
+# 本地已有的大型 MMD/OBJ 素材，不纳入版本控制
+models/M.obj
+models/a.obj
+models/Matrix - OBJ2.mtl
+models/Matrix - OBJ_1.png

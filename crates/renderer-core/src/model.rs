@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 
+pub mod pmx;
+
 /// 引擎统一顶点格式：位置、法线、颜色。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -314,8 +316,9 @@ pub fn load_from_path(path: impl AsRef<std::path::Path>) -> Result<Mesh> {
     match extension.as_str() {
         "obj" => load_from_obj_path(path),
         "gltf" | "glb" => load_from_gltf_path(path),
+        "pmx" => pmx::load_pmx_from_path(path),
         other => Err(anyhow!(
-            "unsupported model format: .{other} (use obj/gltf/glb)"
+            "unsupported model format: .{other} (use obj/gltf/glb/pmx)"
         )),
     }
 }

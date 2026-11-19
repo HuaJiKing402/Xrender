@@ -1,0 +1,298 @@
+use anyhow::{bail, Context, Result};
+
+use super::{color_from_normal, Mesh, MeshVertex};
+
+struct Reader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
+    fn take(&mut self, len: usize, what: &str) -> Result<&'a [u8]> {
+        if self.remaining() < len {
+            bail!("unexpected EOF while reading {what} at offset {}", self.pos);
+        }
+        let slice = &self.data[self.pos..self.pos + len];
+        self.pos += len;
+        Ok(slice)
+    }
+
+    fn u8(&mut self, what: &str) -> Result<u8> {
+        Ok(self.take(1, what)?[0])
+    }
+
+    fn i8(&mut self, what: &str) -> Result<i8> {
+        Ok(self.u8(what)? as i8)
+    }
+
+    fn u16(&mut self, what: &str) -> Result<u16> {
+        let bytes = self.take(2, what)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn i16(&mut self, what: &str) -> Result<i16> {
+        Ok(self.u16(what)? as i16)
+    }
+
+    fn u32(&mut self, what: &str) -> Result<u32> {
+        let bytes = self.take(4, what)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn i32(&mut self, what: &str) -> Result<i32> {
+        Ok(self.u32(what)? as i32)
+    }
+
+    fn f32(&mut self, what: &str) -> Result<f32> {
+        Ok(f32::from_le_bytes(self.take(4, what)?.try_into().unwrap()))
+    }
+
+    fn vec3(&mut self, what: &str) -> Result<[f32; 3]> {
+        Ok([self.f32(what)?, self.f32(what)?, self.f32(what)?])
+    }
+
+    fn vec4(&mut self, what: &str) -> Result<[f32; 4]> {
+        Ok([
+            self.f32(what)?,
+            self.f32(what)?,
+            self.f32(what)?,
+            self.f32(what)?,
+        ])
+    }
+
+    fn text(&mut self, encoding: u8) -> Result<String> {
+        let length = self.i32("text length")?;
+        if length < 0 {
+            bail!("negative text length: {length}");
+        }
+        let bytes = self.take(length as usize, "text")?;
+        match encoding {
+            0 => {
+                if bytes.len() % 2 != 0 {
+                    bail!("UTF-16 text has odd byte length");
+                }
+                let units: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                String::from_utf16(&units).context("invalid UTF-16LE text in PMX")
+            }
+            1 => String::from_utf8(bytes.to_vec()).context("invalid UTF-8 text in PMX"),
+            other => bail!("unsupported PMX text encoding: {other}"),
+        }
+    }
+
+    fn unsigned_index(&mut self, size: u8, what: &str) -> Result<usize> {
+        Ok(match size {
+            1 => self.u8(what)? as usize,
+            2 => self.u16(what)? as usize,
+            4 => self.u32(what)? as usize,
+            other => bail!("invalid index size {other} for {what}"),
+        })
+    }
+
+    fn signed_index(&mut self, size: u8, what: &str) -> Result<i64> {
+        Ok(match size {
+            1 => self.i8(what)? as i64,
+            2 => self.i16(what)? as i64,
+            4 => self.i32(what)? as i64,
+            other => bail!("invalid index size {other} for {what}"),
+        })
+    }
+}
+
+fn deform_bytes(deform_type: u8, bone_index_size: u8) -> Result<usize> {
+    let b = bone_index_size as usize;
+    Ok(match deform_type {
+        0 => b,              // BDEF1
+        1 => 2 * b + 4,      // BDEF2
+        2 => 4 * b + 16,     // BDEF4
+        3 => 2 * b + 4 + 36, // SDEF
+        4 => 4 * b + 16,     // QDEF (PMX 2.1)
+        other => bail!("unsupported PMX deform type: {other}"),
+    })
+}
+
+struct Material {
+    diffuse: [f32; 4],
+    surface_start: usize,
+    surface_count: usize,
+}
+
+/// 解析 PMX 2.0 / 2.1 的几何与材质颜色。
+///
+/// 骨骼、表情、刚体物理、贴图在此阶段不加载，后续版本迭代。
+pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
+    let mut reader = Reader::new(bytes);
+
+    let signature = reader.take(4, "signature")?;
+    if signature != b"PMX " {
+        bail!("not a PMX file: invalid signature");
+    }
+    let version = reader.f32("version")?;
+    if !(2.0..=2.2).contains(&version) {
+        bail!("unsupported PMX version: {version}");
+    }
+
+    let globals_count = reader.u8("globals count")? as usize;
+    if globals_count < 8 {
+        bail!("PMX globals count too small: {globals_count}");
+    }
+    let globals = reader.take(globals_count, "globals")?.to_vec();
+    let encoding = globals[0];
+    let additional_uv_count = globals[1] as usize;
+    let vertex_index_size = globals[2];
+    let texture_index_size = globals[3];
+    let _material_index_size = globals[4];
+    let bone_index_size = globals[5];
+    let _morph_index_size = globals[6];
+    let _rigidbody_index_size = globals[7];
+
+    let name_local = reader.text(encoding)?;
+    let name_universal = reader.text(encoding)?;
+    let _comment_local = reader.text(encoding)?;
+    let _comment_universal = reader.text(encoding)?;
+    let model_name = if !name_universal.is_empty() {
+        name_universal
+    } else if !name_local.is_empty() {
+        name_local
+    } else {
+        name.to_string()
+    };
+
+    let vertex_count = reader.i32("vertex count")?;
+    if vertex_count < 0 {
+        bail!("negative PMX vertex count");
+    }
+    let mut vertices = Vec::with_capacity(vertex_count as usize);
+    for i in 0..vertex_count as usize {
+        let position = reader.vec3("vertex position")?;
+        let normal = reader.vec3("vertex normal")?;
+        let _uv = reader.take(8, "vertex uv")?;
+        reader.take(additional_uv_count * 16, "additional UV")?;
+        let deform_type = reader.u8("deform type")?;
+        reader.take(
+            deform_bytes(deform_type, bone_index_size).with_context(|| format!("vertex {i}"))?,
+            "vertex weights",
+        )?;
+        let _edge_scale = reader.f32("edge scale")?;
+        vertices.push(MeshVertex {
+            position,
+            normal,
+            color: if normal == [0.0; 3] {
+                [0.75, 0.75, 0.8]
+            } else {
+                color_from_normal(normal)
+            },
+        });
+    }
+
+    let index_count = reader.i32("surface count")?;
+    if index_count < 0 || index_count % 3 != 0 {
+        bail!("invalid PMX surface count: {index_count}");
+    }
+    let mut indices = Vec::with_capacity(index_count as usize);
+    for _ in 0..index_count {
+        let index = reader.unsigned_index(vertex_index_size, "surface index")?;
+        if index >= vertices.len() {
+            bail!("surface index {index} out of range");
+        }
+        indices.push(index as u32);
+    }
+
+    let texture_count = reader.i32("texture count")?;
+    if texture_count < 0 {
+        bail!("negative PMX texture count");
+    }
+    for _ in 0..texture_count {
+        let _path = reader.text(encoding)?;
+    }
+
+    let material_count = reader.i32("material count")?;
+    if material_count < 0 {
+        bail!("negative PMX material count");
+    }
+    let mut materials = Vec::with_capacity(material_count as usize);
+    let mut surface_cursor = 0usize;
+    for _ in 0..material_count {
+        let _name_local = reader.text(encoding)?;
+        let _name_universal = reader.text(encoding)?;
+        let diffuse = reader.vec4("material diffuse")?;
+        let _specular = reader.vec3("material specular")?;
+        let _specular_strength = reader.f32("material specular strength")?;
+        let _ambient = reader.vec3("material ambient")?;
+        let _draw_flags = reader.u8("material draw flags")?;
+        let _edge_color = reader.vec4("material edge color")?;
+        let _edge_scale = reader.f32("material edge scale")?;
+        let _texture_index = reader.signed_index(texture_index_size, "texture index")?;
+        let _environment_index = reader.signed_index(texture_index_size, "environment index")?;
+        let _environment_blend = reader.u8("environment blend")?;
+        let toon_reference = reader.u8("toon reference")?;
+        match toon_reference {
+            0 => {
+                reader.signed_index(texture_index_size, "toon texture index")?;
+            }
+            1 => {
+                reader.u8("internal toon index")?;
+            }
+            other => bail!("invalid toon reference: {other}"),
+        }
+        let _meta = reader.text(encoding)?;
+        let surface_count = reader.i32("material surface count")?;
+        if surface_count < 0 || surface_count % 3 != 0 {
+            bail!("invalid material surface count: {surface_count}");
+        }
+        let surface_count = surface_count as usize;
+        if surface_cursor + surface_count > indices.len() {
+            bail!("material surface range exceeds surface list");
+        }
+        materials.push(Material {
+            diffuse,
+            surface_start: surface_cursor,
+            surface_count,
+        });
+        surface_cursor += surface_count;
+    }
+
+    for material in &materials {
+        for index in
+            &indices[material.surface_start..material.surface_start + material.surface_count]
+        {
+            if let Some(vertex) = vertices.get_mut(*index as usize) {
+                vertex.color = [
+                    material.diffuse[0],
+                    material.diffuse[1],
+                    material.diffuse[2],
+                ];
+            }
+        }
+    }
+
+    let mut mesh = Mesh {
+        name: model_name,
+        vertices,
+        indices,
+    };
+    mesh.normalize();
+    Ok(mesh)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_pmx_from_path(path: impl AsRef<std::path::Path>) -> Result<Mesh> {
+    let path = path.as_ref();
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let fallback = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("pmx-model");
+    load_pmx(&bytes, fallback)
+}
