@@ -118,7 +118,8 @@ impl VmdClip {
         })
     }
 
-    /// 按帧号采样骨骼姿态；VMD 的骨骼位置是绝对坐标，转换为相对 rest 的偏移。
+    /// 按帧号采样骨骼姿态。VMD 的骨骼 position 是相对 rest 的局部增量，
+    /// 直接写入 Pose，不能再减去 PMX 骨骼位置。
     pub fn sample(&self, frame: f32, bones: &[Bone]) -> Pose {
         let mut pose = Pose::default();
         for (index, bone) in bones.iter().enumerate() {
@@ -130,7 +131,7 @@ impl VmdClip {
             }
             let sampled = sample_track(track, frame);
             pose.set_rotation(index, sampled.rotation);
-            pose.set_translation(index, sampled.position - Vec3::from(bone.position));
+            pose.set_translation(index, sampled.position);
         }
         pose
     }

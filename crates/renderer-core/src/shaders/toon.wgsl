@@ -38,15 +38,16 @@ struct VertexOutput {
 fn vs_main(input: VertexInput) -> VertexOutput {
     let total = max(input.bone_weights.x + input.bone_weights.y + input.bone_weights.z + input.bone_weights.w, 0.00001);
     let w = input.bone_weights / total;
-    let p = vec4<f32>(input.position, 1.0);
-    let skinned = bone_matrices[input.bone_indices.x] * p * w.x
-        + bone_matrices[input.bone_indices.y] * p * w.y
-        + bone_matrices[input.bone_indices.z] * p * w.z
-        + bone_matrices[input.bone_indices.w] * p * w.w;
+    let skin = bone_matrices[input.bone_indices.x] * w.x
+        + bone_matrices[input.bone_indices.y] * w.y
+        + bone_matrices[input.bone_indices.z] * w.z
+        + bone_matrices[input.bone_indices.w] * w.w;
+    let skinned = skin * vec4<f32>(input.position, 1.0);
+    let skin_normal = mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz) * input.normal;
 
     var output: VertexOutput;
     output.clip_position = uniforms.mvp * skinned;
-    output.normal = normalize((uniforms.model * vec4<f32>(input.normal, 0.0)).xyz);
+    output.normal = normalize((uniforms.model * vec4<f32>(skin_normal, 0.0)).xyz);
     output.color = input.color;
     output.uv = input.uv;
     return output;

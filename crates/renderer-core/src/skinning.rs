@@ -21,9 +21,13 @@ impl Pose {
     }
 }
 
-/// 根据骨骼层级与姿态计算每根骨骼的全局矩阵。
+/// 根据骨骼层级与姿态计算每根骨骼的蒙皮矩阵。
+///
+/// 返回 `AnimGlobal * InverseBind`，而不是单纯的 AnimGlobal：
+/// rest pose 下骨骼全局变换等价于 `T(bone.position)`，因此 inverse bind
+/// 使用 `T(-bone.position)`，保证静止姿态顶点不会被骨骼位置整体平移。
 pub fn compute_bone_matrices(bones: &[Bone], pose: &Pose) -> Vec<Mat4> {
-    let mut globals = vec![Mat4::IDENTITY; bones.len()];
+    let mut animated_globals = vec![Mat4::IDENTITY; bones.len()];
     for (index, bone) in bones.iter().enumerate() {
         let parent_position = bone
             .parent
@@ -38,11 +42,18 @@ pub fn compute_bone_matrices(bones: &[Bone], pose: &Pose) -> Vec<Mat4> {
             .copied()
             .unwrap_or(Quat::IDENTITY);
         let local = Mat4::from_translation(local_translation) * Mat4::from_quat(rotation);
-        globals[index] = bone
+        animated_globals[index] = bone
             .parent
-            .and_then(|parent| globals.get(parent).copied())
+            .and_then(|parent| animated_globals.get(parent).copied())
             .map(|parent_global| parent_global * local)
             .unwrap_or(local);
     }
-    globals
+
+    animated_globals
+        .iter()
+        .zip(bones)
+        .map(|(animated_global, bone)| {
+            *animated_global * Mat4::from_translation(-Vec3::from(bone.position))
+        })
+        .collect()
 }

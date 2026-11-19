@@ -167,6 +167,11 @@ impl Mesh {
                 vertex.position[axis] = (vertex.position[axis] - *center_value) * scale;
             }
         }
+        for bone in &mut self.bones {
+            for (axis, center_value) in center.iter().enumerate() {
+                bone.position[axis] = (bone.position[axis] - *center_value) * scale;
+            }
+        }
         self
     }
 

@@ -27,13 +27,14 @@ struct VertexInput {
 fn vs_main(input: VertexInput) -> @builtin(position) vec4<f32> {
     let total = max(input.bone_weights.x + input.bone_weights.y + input.bone_weights.z + input.bone_weights.w, 0.00001);
     let w = input.bone_weights / total;
-    let p = vec4<f32>(input.position, 1.0);
-    let skinned = bone_matrices[input.bone_indices.x] * p * w.x
-        + bone_matrices[input.bone_indices.y] * p * w.y
-        + bone_matrices[input.bone_indices.z] * p * w.z
-        + bone_matrices[input.bone_indices.w] * p * w.w;
-    let expanded = skinned + vec4<f32>(input.normal * material.params.x * 0.012, 0.0);
-    return uniforms.mvp * expanded;
+    let skin = bone_matrices[input.bone_indices.x] * w.x
+        + bone_matrices[input.bone_indices.y] * w.y
+        + bone_matrices[input.bone_indices.z] * w.z
+        + bone_matrices[input.bone_indices.w] * w.w;
+    let skinned = skin * vec4<f32>(input.position, 1.0);
+    let skin_normal = normalize(mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz) * input.normal);
+    let expanded = skinned.xyz + skin_normal * material.params.x * 0.012;
+    return uniforms.mvp * vec4<f32>(expanded, 1.0);
 }
 
 @fragment
