@@ -11,6 +11,18 @@ pub struct MeshVertex {
     pub normal: [f32; 3],
     pub color: [f32; 3],
     pub uv: [f32; 2],
+    pub bone_indices: [u32; 4],
+    pub bone_weights: [f32; 4],
+}
+
+/// PMX 骨骼（v0.6 用于蒙皮）。
+#[derive(Clone, Debug)]
+pub struct Bone {
+    pub name: String,
+    pub parent: Option<usize>,
+    pub position: [f32; 3],
+    pub layer: i32,
+    pub flags: u16,
 }
 
 /// PMX 材质参数（v0.4 先使用 diffuse/texture，其他字段为后续 Toon 阶段准备）。
@@ -68,6 +80,7 @@ pub struct Mesh {
     pub materials: Vec<Material>,
     pub groups: Vec<MaterialGroup>,
     pub texture_paths: Vec<String>,
+    pub bones: Vec<Bone>,
 }
 
 impl Mesh {
@@ -82,18 +95,24 @@ impl Mesh {
                     normal,
                     color: [0.98, 0.44, 0.52],
                     uv: [0.5, 0.0],
+                    bone_indices: [0; 4],
+                    bone_weights: [1.0, 0.0, 0.0, 0.0],
                 },
                 MeshVertex {
                     position: [-0.6, -0.5, 0.0],
                     normal,
                     color: [0.30, 0.70, 1.00],
                     uv: [0.0, 1.0],
+                    bone_indices: [0; 4],
+                    bone_weights: [1.0, 0.0, 0.0, 0.0],
                 },
                 MeshVertex {
                     position: [0.6, -0.5, 0.0],
                     normal,
                     color: [1.00, 0.86, 0.35],
                     uv: [1.0, 1.0],
+                    bone_indices: [0; 4],
+                    bone_weights: [1.0, 0.0, 0.0, 0.0],
                 },
             ],
             indices: vec![0, 1, 2],
@@ -104,6 +123,7 @@ impl Mesh {
                 index_count: 3,
             }],
             texture_paths: Vec::new(),
+            bones: Vec::new(),
         }
     }
 
@@ -298,6 +318,8 @@ pub fn load_obj(source: &str, name: impl Into<String>) -> Result<Mesh> {
                             color_from_normal(normal)
                         },
                         uv,
+                        bone_indices: [0; 4],
+                        bone_weights: [1.0, 0.0, 0.0, 0.0],
                     });
                 }
                 for i in 1..corners.len() - 1 {
@@ -321,6 +343,7 @@ pub fn load_obj(source: &str, name: impl Into<String>) -> Result<Mesh> {
         materials: Vec::new(),
         groups: Vec::new(),
         texture_paths: Vec::new(),
+        bones: Vec::new(),
     };
     mesh.ensure_normals();
     mesh.ensure_default_materials();
@@ -401,6 +424,8 @@ fn load_from_gltf_path(path: &std::path::Path) -> Result<Mesh> {
                             color_from_normal(normal)
                         },
                         uv,
+                        bone_indices: [0; 4],
+                        bone_weights: [1.0, 0.0, 0.0, 0.0],
                     }
                 })
                 .collect();
@@ -412,6 +437,7 @@ fn load_from_gltf_path(path: &std::path::Path) -> Result<Mesh> {
                 materials: Vec::new(),
                 groups: Vec::new(),
                 texture_paths: Vec::new(),
+                bones: Vec::new(),
             };
             mesh.ensure_normals();
             mesh.ensure_default_materials();

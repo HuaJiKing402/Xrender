@@ -84,12 +84,13 @@ impl ApplicationHandler for App {
             None => model::Mesh::triangle(),
         };
         println!(
-            "Model: {} ({} vertices, {} triangles, {} materials, {} textures)",
+            "Model: {} ({} vertices, {} triangles, {} materials, {} textures, {} bones)",
             mesh.name,
             mesh.vertex_count(),
             mesh.triangle_count(),
             mesh.materials.len(),
-            mesh.texture_paths.len()
+            mesh.texture_paths.len(),
+            mesh.bones.len()
         );
 
         let texture_base_dir = self

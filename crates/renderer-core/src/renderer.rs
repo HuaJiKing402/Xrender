@@ -8,8 +8,9 @@ use crate::{
     backend::BACKEND_LABEL,
     model::{
         texture::{self, TextureSlot},
-        Mesh, MeshVertex,
+        Bone, Mesh, MeshVertex,
     },
+    skinning::{compute_bone_matrices, Pose},
 };
 
 const SHADER_SOURCE: &str = include_str!("shaders/toon.wgsl");
@@ -30,6 +31,13 @@ struct MaterialUniform {
     params: [f32; 4],
 }
 
+fn matrices_to_floats(matrices: &[Mat4]) -> Vec<f32> {
+    matrices
+        .iter()
+        .flat_map(|matrix| matrix.to_cols_array())
+        .collect()
+}
+
 /// 平台无关的渲染器：接收一个已经创建好的 surface，负责设备、管线与帧呈现。
 pub struct Renderer {
     instance: wgpu::Instance,
@@ -42,6 +50,8 @@ pub struct Renderer {
     outline_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
+    bone_buffer: wgpu::Buffer,
+    bones: Vec<Bone>,
     material_bind_groups: Vec<wgpu::BindGroup>,
     texture_slots: Vec<TextureSlot>,
     toon_slots: Vec<TextureSlot>,
@@ -169,26 +179,54 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        let mut identity_bones = compute_bone_matrices(&mesh.bones, &Pose::default());
+        if identity_bones.is_empty() {
+            identity_bones.push(Mat4::IDENTITY);
+        }
+        let bone_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bone matrices"),
+            contents: bytemuck::cast_slice(&matrices_to_floats(&identity_bones)),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
         let global_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh bind group layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mesh bind group"),
             layout: &global_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bone_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -364,6 +402,16 @@ impl Renderer {
                             offset: 36,
                             shader_location: 3,
                         },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32x4,
+                            offset: 44,
+                            shader_location: 4,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 60,
+                            shader_location: 5,
+                        },
                     ],
                 })],
                 compilation_options: Default::default(),
@@ -421,6 +469,16 @@ impl Renderer {
                             offset: 36,
                             shader_location: 3,
                         },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32x4,
+                            offset: 44,
+                            shader_location: 4,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 60,
+                            shader_location: 5,
+                        },
                     ],
                 })],
                 compilation_options: Default::default(),
@@ -475,6 +533,8 @@ impl Renderer {
             outline_pipeline,
             bind_group,
             uniform_buffer,
+            bone_buffer,
+            bones: mesh.bones,
             material_bind_groups,
             texture_slots,
             toon_slots,
@@ -645,6 +705,22 @@ impl Renderer {
 
     pub fn toon_texture_count(&self) -> usize {
         self.toon_slots.len()
+    }
+
+    pub fn bone_count(&self) -> usize {
+        self.bones.len()
+    }
+
+    pub fn set_pose(&mut self, pose: &Pose) {
+        let mut matrices = compute_bone_matrices(&self.bones, pose);
+        if matrices.is_empty() {
+            matrices.push(Mat4::IDENTITY);
+        }
+        self.queue.write_buffer(
+            &self.bone_buffer,
+            0,
+            bytemuck::cast_slice(&matrices_to_floats(&matrices)),
+        );
     }
 
     pub fn instance(&self) -> &wgpu::Instance {

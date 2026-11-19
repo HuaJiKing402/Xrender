@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 
-use super::{color_from_normal, Material, MaterialGroup, Mesh, MeshVertex};
+use super::{color_from_normal, Bone, Material, MaterialGroup, Mesh, MeshVertex};
 
 struct Reader<'a> {
     data: &'a [u8],
@@ -109,16 +109,9 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn deform_bytes(deform_type: u8, bone_index_size: u8) -> Result<usize> {
-    let b = bone_index_size as usize;
-    Ok(match deform_type {
-        0 => b,              // BDEF1
-        1 => 2 * b + 4,      // BDEF2
-        2 => 4 * b + 16,     // BDEF4
-        3 => 2 * b + 4 + 36, // SDEF
-        4 => 4 * b + 16,     // QDEF (PMX 2.1)
-        other => bail!("unsupported PMX deform type: {other}"),
-    })
+fn read_bone_index(reader: &mut Reader<'_>, size: u8, what: &str) -> Result<u32> {
+    let index = reader.signed_index(size, what)?;
+    Ok(usize::try_from(index).unwrap_or(0) as u32)
 }
 
 /// 解析 PMX 2.0 / 2.1 的几何与材质颜色。
@@ -177,10 +170,36 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         ];
         reader.take(additional_uv_count * 16, "additional UV")?;
         let deform_type = reader.u8("deform type")?;
-        reader.take(
-            deform_bytes(deform_type, bone_index_size).with_context(|| format!("vertex {i}"))?,
-            "vertex weights",
-        )?;
+        let mut bone_indices = [0u32; 4];
+        let mut bone_weights = [0.0f32; 4];
+        match deform_type {
+            0 => {
+                bone_indices[0] = read_bone_index(&mut reader, bone_index_size, "BDEF1 bone")?;
+                bone_weights[0] = 1.0;
+            }
+            1 => {
+                bone_indices[0] = read_bone_index(&mut reader, bone_index_size, "BDEF2 bone 1")?;
+                bone_indices[1] = read_bone_index(&mut reader, bone_index_size, "BDEF2 bone 2")?;
+                let w = reader.f32("BDEF2 weight")?;
+                bone_weights = [w, 1.0 - w, 0.0, 0.0];
+            }
+            2 | 4 => {
+                for index in &mut bone_indices {
+                    *index = read_bone_index(&mut reader, bone_index_size, "BDEF4/QDEF bone")?;
+                }
+                for weight in &mut bone_weights {
+                    *weight = reader.f32("BDEF4/QDEF weight")?;
+                }
+            }
+            3 => {
+                bone_indices[0] = read_bone_index(&mut reader, bone_index_size, "SDEF bone 1")?;
+                bone_indices[1] = read_bone_index(&mut reader, bone_index_size, "SDEF bone 2")?;
+                let w = reader.f32("SDEF weight")?;
+                bone_weights = [w, 1.0 - w, 0.0, 0.0];
+                reader.take(36, "SDEF C/R0/R1")?;
+            }
+            other => bail!("unsupported PMX deform type {other} at vertex {i}"),
+        }
         let _edge_scale = reader.f32("edge scale")?;
         vertices.push(MeshVertex {
             position,
@@ -191,6 +210,8 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
                 color_from_normal(normal)
             },
             uv,
+            bone_indices,
+            bone_weights,
         });
     }
 
@@ -280,6 +301,68 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         surface_cursor += surface_count;
     }
 
+    let bone_count = reader.i32("bone count")?;
+    if bone_count < 0 {
+        bail!("negative PMX bone count");
+    }
+    let mut bones = Vec::with_capacity(bone_count as usize);
+    for _ in 0..bone_count {
+        let name_local = reader.text(encoding)?;
+        let name_universal = reader.text(encoding)?;
+        let position = reader.vec3("bone position")?;
+        let parent_raw = reader.signed_index(bone_index_size, "parent bone")?;
+        let layer = reader.i32("bone layer")?;
+        let flags = reader.u16("bone flags")?;
+
+        if flags & 0x0001 != 0 {
+            reader.signed_index(bone_index_size, "tail bone")?;
+        } else {
+            reader.vec3("tail position")?;
+        }
+        if flags & (0x0100 | 0x0200) != 0 {
+            reader.signed_index(bone_index_size, "append parent")?;
+            reader.f32("append rate")?;
+        }
+        if flags & 0x0400 != 0 {
+            reader.vec3("fixed axis")?;
+        }
+        if flags & 0x0800 != 0 {
+            reader.vec3("local x axis")?;
+            reader.vec3("local z axis")?;
+        }
+        if flags & 0x2000 != 0 {
+            reader.i32("external parent key")?;
+        }
+        if flags & 0x0020 != 0 {
+            reader.signed_index(bone_index_size, "IK target")?;
+            reader.i32("IK iterations")?;
+            reader.f32("IK limit angle")?;
+            let link_count = reader.i32("IK link count")?;
+            if link_count < 0 {
+                bail!("negative IK link count");
+            }
+            for _ in 0..link_count {
+                reader.signed_index(bone_index_size, "IK link bone")?;
+                if reader.u8("IK angle limit flag")? != 0 {
+                    reader.vec3("IK lower limit")?;
+                    reader.vec3("IK upper limit")?;
+                }
+            }
+        }
+
+        bones.push(Bone {
+            name: if !name_universal.is_empty() {
+                name_universal
+            } else {
+                name_local
+            },
+            parent: usize::try_from(parent_raw).ok(),
+            position,
+            layer,
+            flags,
+        });
+    }
+
     for group in &groups {
         let material = &materials[group.material_index];
         for index in &indices[group.index_start..group.index_start + group.index_count] {
@@ -300,6 +383,7 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         materials,
         groups,
         texture_paths,
+        bones,
     };
     mesh.ensure_default_materials();
     mesh.normalize();

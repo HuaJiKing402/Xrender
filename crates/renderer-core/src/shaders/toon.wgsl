@@ -4,6 +4,7 @@ struct Uniforms {
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var<storage, read> bone_matrices: array<mat4x4<f32>>;
 
 struct MaterialParams {
     diffuse: vec4<f32>,
@@ -22,6 +23,8 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) uv: vec2<f32>,
+    @location(4) bone_indices: vec4<u32>,
+    @location(5) bone_weights: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -33,8 +36,16 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
+    let total = max(input.bone_weights.x + input.bone_weights.y + input.bone_weights.z + input.bone_weights.w, 0.00001);
+    let w = input.bone_weights / total;
+    let p = vec4<f32>(input.position, 1.0);
+    let skinned = bone_matrices[input.bone_indices.x] * p * w.x
+        + bone_matrices[input.bone_indices.y] * p * w.y
+        + bone_matrices[input.bone_indices.z] * p * w.z
+        + bone_matrices[input.bone_indices.w] * p * w.w;
+
     var output: VertexOutput;
-    output.clip_position = uniforms.mvp * vec4<f32>(input.position, 1.0);
+    output.clip_position = uniforms.mvp * skinned;
     output.normal = normalize((uniforms.model * vec4<f32>(input.normal, 0.0)).xyz);
     output.color = input.color;
     output.uv = input.uv;
