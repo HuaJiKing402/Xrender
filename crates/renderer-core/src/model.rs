@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 
 pub mod pmx;
+pub mod texture;
 
 /// 引擎统一顶点格式：位置、法线、颜色。
 #[repr(C)]
@@ -9,6 +10,53 @@ pub struct MeshVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
+    pub uv: [f32; 2],
+}
+
+/// PMX 材质参数（v0.4 先使用 diffuse/texture，其他字段为后续 Toon 阶段准备）。
+#[derive(Clone, Debug)]
+pub struct Material {
+    pub name: String,
+    pub diffuse: [f32; 4],
+    pub ambient: [f32; 3],
+    pub specular: [f32; 3],
+    pub specular_strength: f32,
+    pub texture_index: Option<usize>,
+    pub sphere_index: Option<usize>,
+    pub sphere_mode: u8,
+    pub toon_reference: u8,
+    pub toon_index: i32,
+    pub flags: u8,
+    pub edge_color: [f32; 4],
+    pub edge_scale: f32,
+}
+
+impl Material {
+    pub fn opaque() -> Self {
+        Self {
+            name: "default".into(),
+            diffuse: [1.0, 1.0, 1.0, 1.0],
+            ambient: [0.0, 0.0, 0.0],
+            specular: [0.0, 0.0, 0.0],
+            specular_strength: 0.0,
+            texture_index: None,
+            sphere_index: None,
+            sphere_mode: 0,
+            toon_reference: 0,
+            toon_index: 0,
+            flags: 0,
+            edge_color: [0.0, 0.0, 0.0, 1.0],
+            edge_scale: 1.0,
+        }
+    }
+}
+
+/// 材质对应的索引区间。
+#[derive(Clone, Debug)]
+pub struct MaterialGroup {
+    pub material_index: usize,
+    pub index_start: usize,
+    pub index_count: usize,
 }
 
 /// 索引化的三角网格。
@@ -17,6 +65,9 @@ pub struct Mesh {
     pub name: String,
     pub vertices: Vec<MeshVertex>,
     pub indices: Vec<u32>,
+    pub materials: Vec<Material>,
+    pub groups: Vec<MaterialGroup>,
+    pub texture_paths: Vec<String>,
 }
 
 impl Mesh {
@@ -30,20 +81,45 @@ impl Mesh {
                     position: [0.0, 0.6, 0.0],
                     normal,
                     color: [0.98, 0.44, 0.52],
+                    uv: [0.5, 0.0],
                 },
                 MeshVertex {
                     position: [-0.6, -0.5, 0.0],
                     normal,
                     color: [0.30, 0.70, 1.00],
+                    uv: [0.0, 1.0],
                 },
                 MeshVertex {
                     position: [0.6, -0.5, 0.0],
                     normal,
                     color: [1.00, 0.86, 0.35],
+                    uv: [1.0, 1.0],
                 },
             ],
             indices: vec![0, 1, 2],
+            materials: vec![Material::opaque()],
+            groups: vec![MaterialGroup {
+                material_index: 0,
+                index_start: 0,
+                index_count: 3,
+            }],
+            texture_paths: Vec::new(),
         }
+    }
+
+    /// 为没有材质信息的格式补一个覆盖全部索引的默认材质。
+    pub fn ensure_default_materials(&mut self) -> &mut Self {
+        if self.materials.is_empty() {
+            self.materials.push(Material::opaque());
+        }
+        if self.groups.is_empty() {
+            self.groups.push(MaterialGroup {
+                material_index: 0,
+                index_start: 0,
+                index_count: self.indices.len(),
+            });
+        }
+        self
     }
 
     /// 把模型居中并缩放到单位尺寸，方便任意自定义模型直接显示。
@@ -147,6 +223,7 @@ fn color_from_normal(normal: [f32; 3]) -> [f32; 3] {
 pub fn load_obj(source: &str, name: impl Into<String>) -> Result<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut vertices: Vec<MeshVertex> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
@@ -163,6 +240,11 @@ pub fn load_obj(source: &str, name: impl Into<String>) -> Result<Mesh> {
                 let z: f32 = parts.next().context("missing v.z")?.parse()?;
                 positions.push([x, y, z]);
             }
+            Some("vt") => {
+                let u: f32 = parts.next().context("missing vt.u")?.parse()?;
+                let v: f32 = parts.next().context("missing vt.v")?.parse()?;
+                uvs.push([u, v]);
+            }
             Some("vn") => {
                 let x: f32 = parts.next().context("missing vn.x")?.parse()?;
                 let y: f32 = parts.next().context("missing vn.y")?.parse()?;
@@ -171,17 +253,24 @@ pub fn load_obj(source: &str, name: impl Into<String>) -> Result<Mesh> {
                 normals.push([x / len, y / len, z / len]);
             }
             Some("f") => {
-                let corners: Vec<(usize, Option<usize>)> = parts
+                let corners: Vec<(usize, Option<usize>, Option<usize>)> = parts
                     .map(|token| {
                         let mut fields = token.split('/');
                         let p: i64 = fields.next().context("missing face position")?.parse()?;
-                        let _uv = fields.next();
+                        let uv: Option<i64> = match fields.next() {
+                            Some(value) if !value.is_empty() => Some(value.parse()?),
+                            _ => None,
+                        };
                         let n: Option<i64> = match fields.next() {
                             Some(value) if !value.is_empty() => Some(value.parse()?),
                             _ => None,
                         };
                         Ok((
                             resolve_index(p, positions.len())?,
+                            match uv {
+                                Some(uv) => Some(resolve_index(uv, uvs.len())?),
+                                None => None,
+                            },
                             match n {
                                 Some(n) => Some(resolve_index(n, normals.len())?),
                                 None => None,
@@ -197,8 +286,9 @@ pub fn load_obj(source: &str, name: impl Into<String>) -> Result<Mesh> {
                     ));
                 }
                 let base = vertices.len() as u32;
-                for (position_index, normal_index) in &corners {
+                for (position_index, uv_index, normal_index) in &corners {
                     let normal = normal_index.map(|i| normals[i]).unwrap_or([0.0; 3]);
+                    let uv = uv_index.map(|i| uvs[i]).unwrap_or([0.0, 0.0]);
                     vertices.push(MeshVertex {
                         position: positions[*position_index],
                         normal,
@@ -207,6 +297,7 @@ pub fn load_obj(source: &str, name: impl Into<String>) -> Result<Mesh> {
                         } else {
                             color_from_normal(normal)
                         },
+                        uv,
                     });
                 }
                 for i in 1..corners.len() - 1 {
@@ -227,8 +318,12 @@ pub fn load_obj(source: &str, name: impl Into<String>) -> Result<Mesh> {
         name: name.into(),
         vertices,
         indices,
+        materials: Vec::new(),
+        groups: Vec::new(),
+        texture_paths: Vec::new(),
     };
     mesh.ensure_normals();
+    mesh.ensure_default_materials();
     mesh.normalize();
     Ok(mesh)
 }
@@ -265,6 +360,21 @@ fn load_from_gltf_path(path: &std::path::Path) -> Result<Mesh> {
             };
             let positions: Vec<[f32; 3]> = positions.collect();
             let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
+            let tex_coords: Option<Vec<[f32; 2]>> =
+                reader.read_tex_coords(0).map(|coords| match coords {
+                    gltf::mesh::util::ReadTexCoords::U8(iter) => iter
+                        .map(|uv| [uv[0] as f32 / u8::MAX as f32, uv[1] as f32 / u8::MAX as f32])
+                        .collect(),
+                    gltf::mesh::util::ReadTexCoords::U16(iter) => iter
+                        .map(|uv| {
+                            [
+                                uv[0] as f32 / u16::MAX as f32,
+                                uv[1] as f32 / u16::MAX as f32,
+                            ]
+                        })
+                        .collect(),
+                    gltf::mesh::util::ReadTexCoords::F32(iter) => iter.collect(),
+                });
             let indices: Vec<u32> = reader
                 .read_indices()
                 .map(|i| i.into_u32().collect())
@@ -278,6 +388,10 @@ fn load_from_gltf_path(path: &std::path::Path) -> Result<Mesh> {
                         .as_ref()
                         .and_then(|list| list.get(i).copied())
                         .unwrap_or([0.0; 3]);
+                    let uv = tex_coords
+                        .as_ref()
+                        .and_then(|list| list.get(i).copied())
+                        .unwrap_or([0.0, 0.0]);
                     MeshVertex {
                         position: *position,
                         normal,
@@ -286,6 +400,7 @@ fn load_from_gltf_path(path: &std::path::Path) -> Result<Mesh> {
                         } else {
                             color_from_normal(normal)
                         },
+                        uv,
                     }
                 })
                 .collect();
@@ -294,8 +409,12 @@ fn load_from_gltf_path(path: &std::path::Path) -> Result<Mesh> {
                 name: mesh.name().unwrap_or(name).to_string(),
                 vertices,
                 indices,
+                materials: Vec::new(),
+                groups: Vec::new(),
+                texture_paths: Vec::new(),
             };
             mesh.ensure_normals();
+            mesh.ensure_default_materials();
             mesh.normalize();
             return Ok(mesh);
         }

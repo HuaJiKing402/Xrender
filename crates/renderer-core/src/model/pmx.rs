@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 
-use super::{color_from_normal, Mesh, MeshVertex};
+use super::{color_from_normal, Material, MaterialGroup, Mesh, MeshVertex};
 
 struct Reader<'a> {
     data: &'a [u8],
@@ -121,12 +121,6 @@ fn deform_bytes(deform_type: u8, bone_index_size: u8) -> Result<usize> {
     })
 }
 
-struct Material {
-    diffuse: [f32; 4],
-    surface_start: usize,
-    surface_count: usize,
-}
-
 /// 解析 PMX 2.0 / 2.1 的几何与材质颜色。
 ///
 /// 骨骼、表情、刚体物理、贴图在此阶段不加载，后续版本迭代。
@@ -176,7 +170,11 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
     for i in 0..vertex_count as usize {
         let position = reader.vec3("vertex position")?;
         let normal = reader.vec3("vertex normal")?;
-        let _uv = reader.take(8, "vertex uv")?;
+        let uv_bytes = reader.take(8, "vertex uv")?;
+        let uv = [
+            f32::from_le_bytes([uv_bytes[0], uv_bytes[1], uv_bytes[2], uv_bytes[3]]),
+            f32::from_le_bytes([uv_bytes[4], uv_bytes[5], uv_bytes[6], uv_bytes[7]]),
+        ];
         reader.take(additional_uv_count * 16, "additional UV")?;
         let deform_type = reader.u8("deform type")?;
         reader.take(
@@ -192,6 +190,7 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
             } else {
                 color_from_normal(normal)
             },
+            uv,
         });
     }
 
@@ -212,8 +211,9 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
     if texture_count < 0 {
         bail!("negative PMX texture count");
     }
+    let mut texture_paths = Vec::with_capacity(texture_count.max(0) as usize);
     for _ in 0..texture_count {
-        let _path = reader.text(encoding)?;
+        texture_paths.push(reader.text(encoding)?);
     }
 
     let material_count = reader.i32("material count")?;
@@ -221,30 +221,27 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         bail!("negative PMX material count");
     }
     let mut materials = Vec::with_capacity(material_count as usize);
+    let mut groups = Vec::with_capacity(material_count as usize);
     let mut surface_cursor = 0usize;
     for _ in 0..material_count {
-        let _name_local = reader.text(encoding)?;
-        let _name_universal = reader.text(encoding)?;
+        let name_local = reader.text(encoding)?;
+        let name_universal = reader.text(encoding)?;
         let diffuse = reader.vec4("material diffuse")?;
-        let _specular = reader.vec3("material specular")?;
-        let _specular_strength = reader.f32("material specular strength")?;
-        let _ambient = reader.vec3("material ambient")?;
-        let _draw_flags = reader.u8("material draw flags")?;
-        let _edge_color = reader.vec4("material edge color")?;
-        let _edge_scale = reader.f32("material edge scale")?;
-        let _texture_index = reader.signed_index(texture_index_size, "texture index")?;
-        let _environment_index = reader.signed_index(texture_index_size, "environment index")?;
-        let _environment_blend = reader.u8("environment blend")?;
+        let specular = reader.vec3("material specular")?;
+        let specular_strength = reader.f32("material specular strength")?;
+        let ambient = reader.vec3("material ambient")?;
+        let flags = reader.u8("material draw flags")?;
+        let edge_color = reader.vec4("material edge color")?;
+        let edge_scale = reader.f32("material edge scale")?;
+        let texture_index = reader.signed_index(texture_index_size, "texture index")?;
+        let environment_index = reader.signed_index(texture_index_size, "environment index")?;
+        let sphere_mode = reader.u8("environment blend")?;
         let toon_reference = reader.u8("toon reference")?;
-        match toon_reference {
-            0 => {
-                reader.signed_index(texture_index_size, "toon texture index")?;
-            }
-            1 => {
-                reader.u8("internal toon index")?;
-            }
+        let toon_index = match toon_reference {
+            0 => reader.signed_index(texture_index_size, "toon texture index")? as i32,
+            1 => reader.u8("internal toon index")? as i32,
             other => bail!("invalid toon reference: {other}"),
-        }
+        };
         let _meta = reader.text(encoding)?;
         let surface_count = reader.i32("material surface count")?;
         if surface_count < 0 || surface_count % 3 != 0 {
@@ -254,18 +251,38 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         if surface_cursor + surface_count > indices.len() {
             bail!("material surface range exceeds surface list");
         }
+
+        let material_index = materials.len();
         materials.push(Material {
+            name: if !name_universal.is_empty() {
+                name_universal
+            } else {
+                name_local
+            },
             diffuse,
-            surface_start: surface_cursor,
-            surface_count,
+            ambient,
+            specular,
+            specular_strength,
+            texture_index: usize::try_from(texture_index).ok(),
+            sphere_index: usize::try_from(environment_index).ok(),
+            sphere_mode,
+            toon_reference,
+            toon_index,
+            flags,
+            edge_color,
+            edge_scale,
+        });
+        groups.push(MaterialGroup {
+            material_index,
+            index_start: surface_cursor,
+            index_count: surface_count,
         });
         surface_cursor += surface_count;
     }
 
-    for material in &materials {
-        for index in
-            &indices[material.surface_start..material.surface_start + material.surface_count]
-        {
+    for group in &groups {
+        let material = &materials[group.material_index];
+        for index in &indices[group.index_start..group.index_start + group.index_count] {
             if let Some(vertex) = vertices.get_mut(*index as usize) {
                 vertex.color = [
                     material.diffuse[0],
@@ -280,7 +297,11 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         name: model_name,
         vertices,
         indices,
+        materials,
+        groups,
+        texture_paths,
     };
+    mesh.ensure_default_materials();
     mesh.normalize();
     Ok(mesh)
 }

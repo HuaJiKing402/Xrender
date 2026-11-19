@@ -1,4 +1,4 @@
-use std::{env, sync::Arc, time::Duration};
+use std::{env, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use renderer_core::{backend, model, Renderer};
@@ -84,18 +84,27 @@ impl ApplicationHandler for App {
             None => model::Mesh::triangle(),
         };
         println!(
-            "Model: {} ({} vertices, {} triangles)",
+            "Model: {} ({} vertices, {} triangles, {} materials, {} textures)",
             mesh.name,
             mesh.vertex_count(),
-            mesh.triangle_count()
+            mesh.triangle_count(),
+            mesh.materials.len(),
+            mesh.texture_paths.len()
         );
 
-        let renderer = match pollster::block_on(Renderer::new_with_mesh(
+        let texture_base_dir = self
+            .model_path
+            .as_deref()
+            .and_then(|path| Path::new(path).parent())
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        let renderer = match pollster::block_on(Renderer::new_with_mesh_and_textures(
             instance,
             surface,
             (size.width, size.height),
             backend::BACKENDS,
             mesh,
+            &texture_base_dir,
         )) {
             Ok(renderer) => renderer,
             Err(error) => {
