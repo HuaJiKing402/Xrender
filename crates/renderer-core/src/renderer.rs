@@ -5,6 +5,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::{
+    animation::VmdClip,
     backend::BACKEND_LABEL,
     model::{
         texture::{self, TextureSlot},
@@ -52,6 +53,7 @@ pub struct Renderer {
     uniform_buffer: wgpu::Buffer,
     bone_buffer: wgpu::Buffer,
     bones: Vec<Bone>,
+    animation: Option<VmdClip>,
     material_bind_groups: Vec<wgpu::BindGroup>,
     texture_slots: Vec<TextureSlot>,
     toon_slots: Vec<TextureSlot>,
@@ -535,6 +537,7 @@ impl Renderer {
             uniform_buffer,
             bone_buffer,
             bones: mesh.bones,
+            animation: None,
             material_bind_groups,
             texture_slots,
             toon_slots,
@@ -568,6 +571,13 @@ impl Renderer {
 
     pub fn render_frame(&mut self) -> Result<()> {
         let elapsed = self.start.elapsed().as_secs_f32();
+        let pose = self
+            .animation
+            .as_ref()
+            .map(|clip| clip.sample(elapsed * 60.0, &self.bones));
+        if let Some(pose) = pose {
+            self.set_pose(&pose);
+        }
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let model = Mat4::from_rotation_y(elapsed * 0.9) * Mat4::from_rotation_x(elapsed * 0.35);
         let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.4), Vec3::ZERO, Vec3::Y);
@@ -709,6 +719,10 @@ impl Renderer {
 
     pub fn bone_count(&self) -> usize {
         self.bones.len()
+    }
+
+    pub fn set_animation(&mut self, clip: VmdClip) {
+        self.animation = Some(clip);
     }
 
     pub fn set_pose(&mut self, pose: &Pose) {

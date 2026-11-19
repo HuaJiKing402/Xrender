@@ -1,7 +1,7 @@
 use std::{env, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use renderer_core::{backend, model, Renderer};
+use renderer_core::{animation::VmdClip, backend, model, Renderer};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -21,11 +21,16 @@ fn model_path_from_args_or_env() -> Option<String> {
     env::args().nth(1).or_else(|| env::var("MODEL_PATH").ok())
 }
 
+fn vmd_path_from_args_or_env() -> Option<String> {
+    env::args().nth(2).or_else(|| env::var("VMD_PATH").ok())
+}
+
 #[derive(Default)]
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     model_path: Option<String>,
+    vmd_path: Option<String>,
     max_frames: Option<u32>,
     frame_count: u32,
     error: Option<String>,
@@ -99,7 +104,7 @@ impl ApplicationHandler for App {
             .and_then(|path| Path::new(path).parent())
             .unwrap_or_else(|| Path::new(""))
             .to_path_buf();
-        let renderer = match pollster::block_on(Renderer::new_with_mesh_and_textures(
+        let mut renderer = match pollster::block_on(Renderer::new_with_mesh_and_textures(
             instance,
             surface,
             (size.width, size.height),
@@ -116,6 +121,29 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+
+        if let Some(path) = &self.vmd_path {
+            let bytes = match std::fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.fail(event_loop, format!("failed to read VMD {path}: {error}"));
+                    return;
+                }
+            };
+            let clip = match VmdClip::parse(&bytes) {
+                Ok(clip) => clip,
+                Err(error) => {
+                    self.fail(event_loop, format!("failed to parse VMD {path}: {error:#}"));
+                    return;
+                }
+            };
+            println!(
+                "Animation: {} ({} bone tracks)",
+                clip.model_name,
+                clip.bone_tracks.len()
+            );
+            renderer.set_animation(clip);
+        }
 
         println!("Backend: {}", backend::BACKEND_LABEL);
         println!("Adapter: {}", renderer.adapter_name());
@@ -179,6 +207,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     let mut app = App {
         model_path: model_path_from_args_or_env(),
+        vmd_path: vmd_path_from_args_or_env(),
         max_frames: max_frames_from_env(),
         ..Default::default()
     };
