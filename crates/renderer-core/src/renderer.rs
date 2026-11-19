@@ -12,7 +12,8 @@ use crate::{
     },
 };
 
-const SHADER_SOURCE: &str = include_str!("shaders/triangles.wgsl");
+const SHADER_SOURCE: &str = include_str!("shaders/toon.wgsl");
+const OUTLINE_SOURCE: &str = include_str!("shaders/outline.wgsl");
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -25,6 +26,8 @@ struct Uniforms {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct MaterialUniform {
     diffuse: [f32; 4],
+    edge_color: [f32; 4],
+    params: [f32; 4],
 }
 
 /// 平台无关的渲染器：接收一个已经创建好的 surface，负责设备、管线与帧呈现。
@@ -36,10 +39,12 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    outline_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
     material_bind_groups: Vec<wgpu::BindGroup>,
     texture_slots: Vec<TextureSlot>,
+    toon_slots: Vec<TextureSlot>,
     // 由 material bind group 持有，但 Rust 侧无需再次读取
     #[allow(dead_code)]
     sampler: wgpu::Sampler,
@@ -149,8 +154,12 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("triangles.wgsl"),
+            label: Some("toon.wgsl"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
+        });
+        let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("outline.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(OUTLINE_SOURCE)),
         });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -198,7 +207,7 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -222,6 +231,26 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -234,11 +263,14 @@ impl Renderer {
             texture: fallback_texture,
             view: fallback_view,
         });
+        let toon_slots = texture::internal_toon_textures(&device, &queue);
 
         let mut material_bind_groups = Vec::with_capacity(mesh.materials.len());
         for material in &mesh.materials {
             let uniform = MaterialUniform {
                 diffuse: material.diffuse,
+                edge_color: material.edge_color,
+                params: [material.edge_scale, material.sphere_mode as f32, 0.0, 0.0],
             };
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("material uniform"),
@@ -247,6 +279,24 @@ impl Renderer {
             });
             let view = material
                 .texture_index
+                .and_then(|index| texture_slots.get(index))
+                .map(|slot| slot.view.clone())
+                .unwrap_or_else(|| texture_slots.last().unwrap().view.clone());
+            let toon_view = if material.toon_reference == 0 {
+                usize::try_from(material.toon_index)
+                    .ok()
+                    .and_then(|index| texture_slots.get(index))
+                    .or_else(|| toon_slots.first())
+            } else {
+                usize::try_from(material.toon_index)
+                    .ok()
+                    .and_then(|index| toon_slots.get(index))
+                    .or_else(|| toon_slots.first())
+            }
+            .map(|slot| slot.view.clone())
+            .unwrap_or_else(|| texture_slots.last().unwrap().view.clone());
+            let sphere_view = material
+                .sphere_index
                 .and_then(|index| texture_slots.get(index))
                 .map(|slot| slot.view.clone())
                 .unwrap_or_else(|| texture_slots.last().unwrap().view.clone());
@@ -265,6 +315,14 @@ impl Renderer {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&toon_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&sphere_view),
                     },
                 ],
             }));
@@ -333,6 +391,66 @@ impl Renderer {
             cache: None,
         });
 
+        let outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("outline pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &outline_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<MeshVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 12,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 24,
+                            shader_location: 2,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 36,
+                            shader_location: 3,
+                        },
+                    ],
+                })],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &outline_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Front),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh vertices"),
             contents: bytemuck::cast_slice(&mesh.vertices),
@@ -354,10 +472,12 @@ impl Renderer {
             surface,
             config,
             pipeline,
+            outline_pipeline,
             bind_group,
             uniform_buffer,
             material_bind_groups,
             texture_slots,
+            toon_slots,
             sampler,
             vertex_buffer,
             index_buffer,
@@ -461,6 +581,24 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            pass.set_pipeline(&self.outline_pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            for group in &self.groups {
+                if group.index_count == 0 {
+                    continue;
+                }
+                if let Some(bind_group) = self.material_bind_groups.get(group.material_index) {
+                    pass.set_bind_group(1, bind_group, &[]);
+                }
+                pass.draw_indexed(
+                    group.index_start as u32..(group.index_start + group.index_count) as u32,
+                    0,
+                    0..1,
+                );
+            }
+
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -503,6 +641,10 @@ impl Renderer {
 
     pub fn texture_count(&self) -> usize {
         self.texture_slots.len().saturating_sub(1)
+    }
+
+    pub fn toon_texture_count(&self) -> usize {
+        self.toon_slots.len()
     }
 
     pub fn instance(&self) -> &wgpu::Instance {

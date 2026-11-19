@@ -7,11 +7,15 @@ struct Uniforms {
 
 struct MaterialParams {
     diffuse: vec4<f32>,
+    edge_color: vec4<f32>,
+    params: vec4<f32>,
 };
 
 @group(1) @binding(0) var<uniform> material: MaterialParams;
 @group(1) @binding(1) var diffuse_texture: texture_2d<f32>;
 @group(1) @binding(2) var diffuse_sampler: sampler;
+@group(1) @binding(3) var toon_texture: texture_2d<f32>;
+@group(1) @binding(4) var sphere_texture: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -39,9 +43,22 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let normal = normalize(input.normal);
     let light_direction = normalize(vec3<f32>(0.4, 0.8, 1.0));
-    let diffuse = max(dot(normalize(input.normal), light_direction), 0.0);
-    let shade = 0.28 + 0.72 * diffuse;
+    let ndl = clamp(dot(normal, light_direction), 0.0, 1.0);
+    let toon = textureSample(toon_texture, diffuse_sampler, vec2<f32>(ndl, 0.5)).rgb;
     let texel = textureSample(diffuse_texture, diffuse_sampler, input.uv);
-    return vec4<f32>(input.color * material.diffuse.rgb * texel.rgb * shade, 1.0);
+    var color = input.color * material.diffuse.rgb * texel.rgb * toon;
+
+    let sphere_mode = u32(material.params.y);
+    if (sphere_mode == 1u || sphere_mode == 2u) {
+        let sphere_uv = vec2<f32>(normal.x * 0.5 + 0.5, normal.y * 0.5 + 0.5);
+        let sphere = textureSample(sphere_texture, diffuse_sampler, sphere_uv).rgb;
+        if (sphere_mode == 1u) {
+            color = color * sphere;
+        } else {
+            color = color + sphere;
+        }
+    }
+    return vec4<f32>(color, 1.0);
 }
