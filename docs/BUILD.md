@@ -19,10 +19,11 @@ MAX_FRAMES=5 cargo run -p app-desktop               # 无交互验证
 MODEL_PATH=models/cube.obj MAX_FRAMES=5 cargo run -p app-desktop
 MODEL_PATH=models/triangle.gltf MAX_FRAMES=5 cargo run -p app-desktop
 MODEL_PATH=models/triangle.pmx MAX_FRAMES=5 cargo run -p app-desktop
-cargo run -p app-desktop -- path/to/your_model.pmx
+MODEL_PATH="models/56e/星穹铁道-阿哈2.pmx" VMD_PATH="models/56e/test_rotation.vmd" MAX_FRAMES=60 cargo run -p app-desktop
+cargo run -p app-desktop -- path/to/your_model.pmx path/to/motion.vmd
 ```
 
-支持 OBJ / glTF / GLB / PMX。模型自动居中缩放；`TRIANGLE_MAX_FRAMES` 作为旧环境变量仍兼容。
+支持 OBJ / glTF / GLB / PMX 与 VMD 动画。模型自动居中缩放；`TRIANGLE_MAX_FRAMES` 作为旧环境变量仍兼容。真实大模型与 VMD 夹具仅本地回归，不入库。
 
 桌面强制 Vulkan。构建不需要 Vulkan SDK，但**运行需要可用的 Vulkan 驱动**；若没有，程序会打印明确诊断并退出。
 

@@ -5,9 +5,9 @@
 ## 当前状态
 
 - `renderer-core`：平台无关渲染内核，负责 Instance/Adapter/Device、交换链配置、WGSL 网格管线、模型导入与帧呈现。
-- `app-desktop`：Windows/Linux 桌面入口，已在本机验证可渲染内置三角形、OBJ 立方体、glTF 三角形与 PMX 三角形。
+- `app-desktop`：Windows/Linux 桌面入口，已在本机验证 PMX 贴图材质、Toon/描边、骨骼蒙皮与 VMD 动画。
 - `app-web` / `app-android` / `app-apple`：Web、Android、Apple 平台脚手架（代码与配置齐全，未在本机验证）。
-- `models/`：示例模型 `cube.obj`、`triangle.gltf`、`triangle.pmx`。
+- `models/`：示例模型 `cube.obj`、`triangle.gltf`、`triangle.pmx`；大模型与 VMD 夹具仅本地回归，不入库。
 
 ## 快速开始（Windows 桌面）
 
@@ -18,7 +18,7 @@ MAX_FRAMES=5 cargo run -p app-desktop
 预期输出：
 
 ```text
-Model: builtin-triangle (3 vertices, 1 triangles)
+Model: builtin-triangle (3 vertices, 1 triangles, 1 materials, 0 textures, 0 bones)
 Backend: Vulkan
 Adapter: AMD Radeon RX 5700 XT
 Window: 800x600
@@ -29,18 +29,18 @@ rendered 5 frames
 
 ## 导入自定义模型
 
-支持 `.obj`、`.gltf`、`.glb`、`.pmx`（MMD PMX 2.0/2.1 基础几何与材质色），可用命令行参数或 `MODEL_PATH` 环境变量：
+支持 `.obj`、`.gltf`、`.glb`、`.pmx`，可用命令行参数或 `MODEL_PATH` 环境变量；VMD 动画用 `VMD_PATH` 或第二个命令行参数：
 
 ```bash
 MODEL_PATH=models/cube.obj MAX_FRAMES=5 cargo run -p app-desktop
 MODEL_PATH=models/triangle.gltf MAX_FRAMES=5 cargo run -p app-desktop
 MODEL_PATH=models/triangle.pmx MAX_FRAMES=5 cargo run -p app-desktop
-cargo run -p app-desktop -- path/to/your_model.pmx
+cargo run -p app-desktop -- path/to/your_model.pmx path/to/motion.vmd
 ```
 
-输出会显示模型名、顶点数与三角形数。模型会自动居中并缩放到单位尺寸，带简单方向光着色与旋转相机动画。未提供模型时使用内置三角形回退。
+输出会显示模型名、顶点/三角形/材质/贴图/骨骼数与动画轨道数。模型自动居中缩放，使用 Toon + 描边 + Sphere map 渲染，并可通过 VMD 驱动骨骼动画。未提供模型时使用内置三角形回退。
 
-PMX 当前为 v0.3 基础导入：解析顶点/法线/UV/索引/材质颜色，忽略骨骼、表情、贴图与刚体物理。完整 MMD 兼容按 `docs/MMD_ROADMAP.md` 逐版迭代。
+PMX/MMD 当前完成到 v0.7：几何、贴图材质、Toon/描边、骨骼蒙皮、VMD 动画。表情（v0.8）与刚体物理（v0.9）尚未实现，详见 `docs/MMD_ROADMAP.md`。
 
 ## 设计原则
 
