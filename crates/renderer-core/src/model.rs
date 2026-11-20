@@ -180,7 +180,7 @@ impl Mesh {
         if self.vertices.iter().all(|v| v.normal != [0.0; 3]) {
             return;
         }
-        for triangle in self.indices.chunks_exact(3) {
+        for triangle in self.indices.as_chunks::<3>().0 {
             let (a, b, c) = (triangle[0], triangle[1], triangle[2]);
             let Some((p0, p1, p2)) = (|| {
                 Some((

@@ -1,4 +1,9 @@
-use std::{env, path::Path, sync::Arc, time::Duration};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use renderer_core::{animation::VmdClip, backend, model, Renderer};
@@ -143,6 +148,16 @@ impl ApplicationHandler for App {
                 clip.bone_tracks.len()
             );
             renderer.set_animation(clip);
+        }
+
+        if env::var("CROSS_RENDER_FPS").ok().as_deref() != Some("0") {
+            let font_path = env::var("FONT_PATH").ok().map(PathBuf::from);
+            let enabled = renderer.enable_fps_overlay(font_path.as_deref());
+            if enabled {
+                println!("Overlay: FPS");
+            } else {
+                println!("Overlay: FPS disabled (no usable font)");
+            }
         }
 
         println!("Backend: {}", backend::BACKEND_LABEL);

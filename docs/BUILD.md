@@ -25,6 +25,15 @@ cargo run -p app-desktop -- path/to/your_model.pmx path/to/motion.vmd
 
 支持 OBJ / glTF / GLB / PMX 与 VMD 动画。模型自动居中缩放；`TRIANGLE_MAX_FRAMES` 作为旧环境变量仍兼容。真实大模型与 VMD 夹具仅本地回归，不入库。
 
+FPS 叠加默认开启，可用 `FONT_PATH` 指定 `.otf/.ttf/.ttc/.otc`，或用 `CROSS_RENDER_FPS=0` 关闭：
+
+```bash
+FONT_PATH="C:/Windows/Fonts/consola.ttf" MAX_FRAMES=5 cargo run -p app-desktop
+CROSS_RENDER_FPS=0 MAX_FRAMES=5 cargo run -p app-desktop
+```
+
+`glyphon 0.12` / `cosmic-text 0.19` 要求 Rust 1.89+。
+
 桌面强制 Vulkan。构建不需要 Vulkan SDK，但**运行需要可用的 Vulkan 驱动**；若没有，程序会打印明确诊断并退出。
 
 ## Web / WASM（脚手架，未在本机验证）

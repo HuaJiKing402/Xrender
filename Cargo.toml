@@ -15,7 +15,7 @@ default-members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.89"
 
 [workspace.dependencies]
 wgpu = "=30.0.2"
@@ -30,3 +30,4 @@ glam = "0.29"
 gltf = "1"
 image = "0.25"
 encoding_rs = "0.8"
+glyphon = "=0.12.0"

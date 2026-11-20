@@ -5,7 +5,7 @@
 ## 当前状态
 
 - `renderer-core`：平台无关渲染内核，负责 Instance/Adapter/Device、交换链配置、WGSL 网格管线、模型导入与帧呈现。
-- `app-desktop`：Windows/Linux 桌面入口，已在本机验证 PMX 贴图材质、Toon/描边、骨骼蒙皮与 VMD 动画。
+- `app-desktop`：Windows/Linux 桌面入口，已在本机验证 PMX 贴图材质、Toon/描边、骨骼蒙皮、VMD 动画与左上角 FPS 叠加。
 - `app-web` / `app-android` / `app-apple`：Web、Android、Apple 平台脚手架（代码与配置齐全，未在本机验证）。
 - `models/`：示例模型 `cube.obj`、`triangle.gltf`、`triangle.pmx`；大模型与 VMD 夹具仅本地回归，不入库。
 
@@ -19,6 +19,7 @@ MAX_FRAMES=5 cargo run -p app-desktop
 
 ```text
 Model: builtin-triangle (3 vertices, 1 triangles, 1 materials, 0 textures, 0 bones)
+Overlay: FPS
 Backend: Vulkan
 Adapter: AMD Radeon RX 5700 XT
 Window: 800x600
@@ -26,6 +27,23 @@ rendered 5 frames
 ```
 
 窗口中出现一个粉红/渐变三角形。按 Esc 或关闭窗口退出；设置 `MAX_FRAMES`（旧变量 `TRIANGLE_MAX_FRAMES` 仍兼容）后自动退出，便于 CI/脚本验证。
+
+## FPS 叠加
+
+桌面端左上角默认显示 `FPS: 60`，白字黑描边。字体由 `glyphon` + `cosmic-text` 渲染：
+
+```bash
+# 使用系统等宽字体（默认）
+cargo run -p app-desktop
+
+# 指定 OpenType 字体（.otf / .ttf / .ttc / .otc）
+FONT_PATH="C:/Windows/Fonts/consola.ttf" cargo run -p app-desktop
+
+# 关闭 FPS 叠加
+CROSS_RENDER_FPS=0 cargo run -p app-desktop
+```
+
+字体只加载一次；`FONT_PATH` 读取失败或没有可用系统字体时只打印警告，不影响 3D 渲染。
 
 ## 导入自定义模型
 

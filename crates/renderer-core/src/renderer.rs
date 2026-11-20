@@ -11,6 +11,7 @@ use crate::{
         texture::{self, TextureSlot},
         Bone, Mesh, MeshVertex,
     },
+    overlay::FpsOverlay,
     skinning::{compute_bone_matrices, Pose},
 };
 
@@ -64,6 +65,7 @@ pub struct Renderer {
     index_buffer: wgpu::Buffer,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    fps_overlay: Option<FpsOverlay>,
     groups: Vec<crate::model::MaterialGroup>,
     index_count: u32,
     model_name: String,
@@ -546,6 +548,7 @@ impl Renderer {
             index_buffer,
             depth_texture,
             depth_view,
+            fps_overlay: None,
             groups: mesh.groups,
             index_count: mesh.indices.len() as u32,
             model_name: mesh.name,
@@ -567,9 +570,21 @@ impl Renderer {
         self.depth_view = self
             .depth_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        if let Some(overlay) = &mut self.fps_overlay {
+            overlay.update(&self.queue, size, Instant::now());
+        }
     }
 
     pub fn render_frame(&mut self) -> Result<()> {
+        let now = Instant::now();
+        if let Some(overlay) = &mut self.fps_overlay {
+            overlay.tick(now);
+            overlay.update(&self.queue, (self.config.width, self.config.height), now);
+            if let Err(error) = overlay.prepare(&self.device, &self.queue) {
+                log::warn!("{error:#}");
+            }
+        }
+
         let elapsed = self.start.elapsed().as_secs_f32();
         let pose = self
             .animation
@@ -686,6 +701,12 @@ impl Renderer {
                     0..1,
                 );
             }
+
+            if let Some(overlay) = &self.fps_overlay {
+                if let Err(error) = overlay.render(&mut pass) {
+                    log::warn!("{error:#}");
+                }
+            }
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -723,6 +744,25 @@ impl Renderer {
 
     pub fn set_animation(&mut self, clip: VmdClip) {
         self.animation = Some(clip);
+    }
+
+    /// 开启左上角 FPS 叠加；`font_path` 可指定 OpenType 字体文件。
+    /// 返回 false 表示没有可用字体，此时不绘制文字。
+    pub fn enable_fps_overlay(&mut self, font_path: Option<&Path>) -> bool {
+        let overlay = FpsOverlay::new(
+            &self.device,
+            &self.queue,
+            self.config.format,
+            (self.config.width, self.config.height),
+            font_path,
+        );
+        let enabled = overlay.enabled();
+        self.fps_overlay = Some(overlay);
+        enabled
+    }
+
+    pub fn fps(&self) -> Option<f32> {
+        self.fps_overlay.as_ref().and_then(FpsOverlay::fps)
     }
 
     pub fn set_pose(&mut self, pose: &Pose) {

@@ -2,7 +2,7 @@
 
 | 平台 | 后端 | 入口 crate | 验证状态 | 说明 |
 |---|---|---|---|---|
-| Windows 桌面 | Vulkan（强制） | `app-desktop` | **已在本机验证** | wgpu 30.0.2；PMX 贴图/Toon/描边/骨骼/VMD 动画 |
+| Windows 桌面 | Vulkan（强制） | `app-desktop` | **已在本机验证** | wgpu 30.0.2；PMX 贴图/Toon/描边/骨骼/VMD 动画/OpenType FPS 叠加 |
 | Linux 桌面 | Vulkan（强制） | `app-desktop` | 脚手架 | 同一入口，需在 Linux 设备验证 |
 | Android | Vulkan | `app-android` | 脚手架 | GameActivity + ANativeWindow，minSdk 26 |
 | macOS | Metal | `app-apple` | 脚手架 | 原生 Metal，不需要 MoltenVK |
