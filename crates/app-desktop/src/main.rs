@@ -9,9 +9,10 @@ use anyhow::{Context, Result};
 use renderer_core::{animation::VmdClip, backend, model, Renderer};
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    dpi::PhysicalPosition,
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{Key, NamedKey},
+    keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -38,6 +39,8 @@ struct App {
     vmd_path: Option<String>,
     max_frames: Option<u32>,
     frame_count: u32,
+    drag_button: Option<MouseButton>,
+    last_cursor: Option<PhysicalPosition<f64>>,
     error: Option<String>,
 }
 
@@ -185,6 +188,62 @@ impl ApplicationHandler for App {
                 if event.logical_key == Key::Named(NamedKey::Escape) {
                     event_loop.exit();
                 }
+                if event.state == ElementState::Pressed
+                    && !event.repeat
+                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyR))
+                {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        renderer.reset_camera();
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => match state {
+                ElementState::Pressed => {
+                    if matches!(
+                        button,
+                        MouseButton::Left | MouseButton::Right | MouseButton::Middle
+                    ) {
+                        self.drag_button = Some(button);
+                    }
+                }
+                ElementState::Released => {
+                    if self.drag_button == Some(button) {
+                        self.drag_button = None;
+                    }
+                }
+            },
+            WindowEvent::CursorMoved { position, .. } => {
+                let previous = self.last_cursor.replace(position);
+                if let (Some(previous), Some(button)) = (previous, self.drag_button) {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        let dx = (position.x - previous.x) as f32;
+                        let dy = (position.y - previous.y) as f32;
+                        match button {
+                            MouseButton::Left => renderer.orbit(dx, dy),
+                            MouseButton::Right | MouseButton::Middle => renderer.pan(dx, dy),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(position) => position.y as f32 / 50.0,
+                };
+                if lines != 0.0 {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        renderer.zoom(lines.clamp(-3.0, 3.0));
+                    }
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.drag_button = None;
+                self.last_cursor = None;
+            }
+            WindowEvent::Focused(false) => {
+                self.drag_button = None;
+                self.last_cursor = None;
             }
             WindowEvent::RedrawRequested => {
                 let Some(renderer) = self.renderer.as_mut() else {
@@ -201,12 +260,11 @@ impl ApplicationHandler for App {
                         event_loop.exit();
                     }
                 }
+                if self.max_frames.is_none() {
+                    std::thread::sleep(Duration::from_millis(16));
+                }
             }
             _ => {}
-        }
-
-        if self.max_frames.is_none() {
-            std::thread::sleep(Duration::from_millis(16));
         }
     }
 

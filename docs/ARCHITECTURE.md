@@ -14,6 +14,7 @@
 - `renderer_core::model` 提供 OBJ / glTF / GLB / PMX 导入，统一输出索引化三角网格。
 - `renderer_core::model::pmx` 解析 PMX 2.0/2.1 的几何、UV、材质、贴图路径、骨骼与权重；表情/刚体留后续版本。
 - `renderer_core::animation::VmdClip` 解析 VMD 骨骼/表情轨道并采样为 `Pose`；`skinning` 根据骨骼层级计算全局矩阵。
+- `renderer_core::camera::OrbitCamera` 提供轨道相机：yaw/pitch/distance/target，支持旋转、平移、缩放和复位。
 - `renderer_core::overlay::FpsOverlay` 用 glyphon/cosmic-text 在 mesh pass 末尾绘制屏幕空间 FPS 文字。
 
 ## 关键类型
@@ -24,9 +25,10 @@
 - `model::Mesh`：位置/法线/颜色/UV/骨骼索引/权重 + u32 索引 + 材质分组 + 骨骼列表。
 - `model::load_from_path(path)`：按扩展名加载 `.obj` / `.gltf` / `.glb` / `.pmx`。
 - `Renderer::enable_fps_overlay(font_path)`：开启左上角 FPS 叠加；`None` 使用系统等宽字体。
+- `Renderer::orbit/pan/zoom/reset_camera()`：控制轨道相机；app 只传鼠标增量。
 - `Renderer::set_animation(clip)` / `set_pose(pose)`：绑定 VMD 或直接写入骨骼姿态。
-- `Renderer::resize(size)`：零尺寸跳过；重建 surface config、深度纹理与文字 viewport。
-- `Renderer::render_frame()`：采样动画、计算 MVP、写 uniform/骨骼矩阵，绘制 outline + toon，最后在同一个 pass 末尾画 FPS 文字。
+- `Renderer::resize(size)`：零尺寸跳过；重建 surface config、深度纹理、文字 viewport 与相机 viewport。
+- `Renderer::render_frame()`：采样动画、计算相机 view/projection 与 MVP、写 uniform/骨骼矩阵，绘制 outline + toon，最后在同一个 pass 末尾画 FPS 文字。
 
 ## 着色器
 

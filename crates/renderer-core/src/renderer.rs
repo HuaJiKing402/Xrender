@@ -1,12 +1,13 @@
 use std::{borrow::Cow, path::Path, time::Instant};
 
 use anyhow::{anyhow, Context, Result};
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use wgpu::util::DeviceExt;
 
 use crate::{
     animation::VmdClip,
     backend::BACKEND_LABEL,
+    camera::OrbitCamera,
     model::{
         texture::{self, TextureSlot},
         Bone, Mesh, MeshVertex,
@@ -66,6 +67,7 @@ pub struct Renderer {
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
     fps_overlay: Option<FpsOverlay>,
+    camera: OrbitCamera,
     groups: Vec<crate::model::MaterialGroup>,
     index_count: u32,
     model_name: String,
@@ -549,6 +551,11 @@ impl Renderer {
             depth_texture,
             depth_view,
             fps_overlay: None,
+            camera: {
+                let mut camera = OrbitCamera::default();
+                camera.set_viewport(size.0, size.1);
+                camera
+            },
             groups: mesh.groups,
             index_count: mesh.indices.len() as u32,
             model_name: mesh.name,
@@ -570,6 +577,7 @@ impl Renderer {
         self.depth_view = self
             .depth_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        self.camera.set_viewport(size.0, size.1);
         if let Some(overlay) = &mut self.fps_overlay {
             overlay.update(&self.queue, size, Instant::now());
         }
@@ -593,11 +601,8 @@ impl Renderer {
         if let Some(pose) = pose {
             self.set_pose(&pose);
         }
-        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let model = Mat4::from_rotation_y(elapsed * 0.9) * Mat4::from_rotation_x(elapsed * 0.35);
-        let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.4), Vec3::ZERO, Vec3::Y);
-        let projection = Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 100.0);
-        let mvp = projection * view * model;
+        let model = Mat4::IDENTITY;
+        let mvp = self.camera.view_projection() * model;
         let uniforms = Uniforms {
             mvp: mvp.to_cols_array_2d(),
             model: model.to_cols_array_2d(),
@@ -763,6 +768,26 @@ impl Renderer {
 
     pub fn fps(&self) -> Option<f32> {
         self.fps_overlay.as_ref().and_then(FpsOverlay::fps)
+    }
+
+    pub fn orbit(&mut self, dx: f32, dy: f32) {
+        self.camera.orbit(dx, dy);
+    }
+
+    pub fn pan(&mut self, dx: f32, dy: f32) {
+        self.camera.pan(dx, dy);
+    }
+
+    pub fn zoom(&mut self, notches: f32) {
+        self.camera.zoom(notches);
+    }
+
+    pub fn reset_camera(&mut self) {
+        self.camera.reset();
+    }
+
+    pub fn camera(&self) -> &OrbitCamera {
+        &self.camera
     }
 
     pub fn set_pose(&mut self, pose: &Pose) {
