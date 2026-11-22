@@ -1,6 +1,19 @@
 /target/
+**/target/
 platforms/web/pkg/
+platforms/android/.gradle/
+platforms/android/build/
+platforms/android/app/build/
+platforms/apple/build/
 *.log
+
+# 编辑器/系统临时文件
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.bak
+*.orig
 
 # 本地已有的大型 MMD/OBJ 素材，不纳入版本控制
 models/M.obj

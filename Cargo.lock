@@ -166,7 +166,6 @@ name = "app-android"
 version = "0.1.0"
 dependencies = [
  "android-activity",
- "anyhow",
  "log",
  "pollster",
  "raw-window-handle",
@@ -206,7 +205,6 @@ dependencies = [
  "console_error_panic_hook",
  "renderer-core",
  "wasm-bindgen",
- "wasm-bindgen-futures",
  "web-sys",
  "wgpu",
 ]

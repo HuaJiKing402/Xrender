@@ -4,9 +4,9 @@
 |---|---|---|---|---|
 | Windows 桌面 | Vulkan（强制） | `app-desktop` | **已在本机验证** | wgpu 30.0.2；PMX 贴图/Toon/描边/骨骼/VMD/轨道相机/OpenType FPS |
 | Linux 桌面 | Vulkan（强制） | `app-desktop` | 脚手架 | 同一入口，需在 Linux 设备验证 |
-| Android | Vulkan | `app-android` | 脚手架 | GameActivity + ANativeWindow，minSdk 26 |
-| macOS | Metal | `app-apple` | 脚手架 | 原生 Metal，不需要 MoltenVK |
-| iOS | Metal | `app-apple` | 脚手架 | 需处理 surface 生命周期与签名 |
+| Android | Vulkan | `app-android` | 源码脚手架 | GameActivity + ANativeWindow，minSdk 26；已有 manifest/根 build.gradle，缺 Gradle wrapper、settings.gradle 与 app 模块目录 |
+| macOS | Metal | `app-apple` | 源码脚手架 | 原生 Metal，不需要 MoltenVK；`platforms/apple/xcodegen.yml` 需 xcodegen 生成工程 |
+| iOS | Metal | `app-apple` | 源码脚手架 | 需处理 surface 生命周期与签名；`Info.plist` 不是 Rust workspace 构建输入 |
 | Web / WASM | WebGPU | `app-web` | 脚手架 | canvas + wasm-bindgen，浏览器需支持 WebGPU |
 
 ## 未验证项

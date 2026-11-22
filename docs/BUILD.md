@@ -53,7 +53,7 @@ cargo ndk -t arm64-v8a -p 26 -o platforms/android/app/src/main/jniLibs \
 cd platforms/android && ./gradlew assembleDebug
 ```
 
-要求 NDK、minSdk 26、设备支持 Vulkan。`AndroidManifest.xml` 与 Gradle 骨架在 `platforms/android/`。
+要求 NDK、minSdk 26、设备支持 Vulkan。已提供 `AndroidManifest.xml` 与根 `build.gradle`；还缺 Gradle wrapper、`settings.gradle` 与完整 app 模块目录，当前需补齐后才能执行 `./gradlew assembleDebug`。
 
 ## macOS / iOS（脚手架，未在本机验证）
 
