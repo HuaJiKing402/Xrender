@@ -175,6 +175,19 @@ impl Mesh {
         self
     }
 
+    /// PMX 等已有法线的模型：补默认材质并归一化，不改法线。
+    pub(crate) fn finish(mut self) -> Self {
+        self.ensure_default_materials();
+        self.normalize();
+        self
+    }
+
+    /// OBJ/glTF 等可能缺法线的模型：先补法线，再补默认材质并归一化。
+    pub(crate) fn finish_with_normals(mut self) -> Self {
+        self.ensure_normals();
+        self.finish()
+    }
+
     /// 若模型没有法线，按面法线补齐。
     pub fn ensure_normals(&mut self) {
         if self.vertices.iter().all(|v| v.normal != [0.0; 3]) {
@@ -341,7 +354,7 @@ pub fn load_obj(source: &str, name: impl Into<String>) -> Result<Mesh> {
         return Err(anyhow!("OBJ contains no triangles"));
     }
 
-    let mut mesh = Mesh {
+    let mesh = Mesh {
         name: name.into(),
         vertices,
         indices,
@@ -350,10 +363,7 @@ pub fn load_obj(source: &str, name: impl Into<String>) -> Result<Mesh> {
         texture_paths: Vec::new(),
         bones: Vec::new(),
     };
-    mesh.ensure_normals();
-    mesh.ensure_default_materials();
-    mesh.normalize();
-    Ok(mesh)
+    Ok(mesh.finish_with_normals())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -435,7 +445,7 @@ fn load_from_gltf_path(path: &std::path::Path) -> Result<Mesh> {
                 })
                 .collect();
 
-            let mut mesh = Mesh {
+            let mesh = Mesh {
                 name: mesh.name().unwrap_or(name).to_string(),
                 vertices,
                 indices,
@@ -444,10 +454,7 @@ fn load_from_gltf_path(path: &std::path::Path) -> Result<Mesh> {
                 texture_paths: Vec::new(),
                 bones: Vec::new(),
             };
-            mesh.ensure_normals();
-            mesh.ensure_default_materials();
-            mesh.normalize();
-            return Ok(mesh);
+            return Ok(mesh.finish_with_normals());
         }
     }
 

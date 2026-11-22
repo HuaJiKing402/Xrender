@@ -5,6 +5,7 @@ mod fps;
 pub mod model;
 mod overlay;
 pub mod renderer;
+mod renderer_helpers;
 pub mod skinning;
 
 pub use camera::OrbitCamera;

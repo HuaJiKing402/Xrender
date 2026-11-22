@@ -10,9 +10,10 @@ use crate::{
     camera::OrbitCamera,
     model::{
         texture::{self, TextureSlot},
-        Bone, Mesh, MeshVertex,
+        Bone, Mesh,
     },
     overlay::FpsOverlay,
+    renderer_helpers::{create_depth_texture, depth_state, draw_material_groups, vertex_layout},
     skinning::{compute_bone_matrices, Pose},
 };
 
@@ -72,23 +73,6 @@ pub struct Renderer {
     index_count: u32,
     model_name: String,
     start: Instant,
-}
-
-fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("depth texture"),
-        size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    })
 }
 
 impl Renderer {
@@ -305,7 +289,7 @@ impl Renderer {
         texture_slots.push(TextureSlot {
             label: "white-fallback".into(),
             texture: fallback_texture,
-            view: fallback_view,
+            view: fallback_view.clone(),
         });
         let toon_slots = texture::internal_toon_textures(&device, &queue);
 
@@ -325,7 +309,7 @@ impl Renderer {
                 .texture_index
                 .and_then(|index| texture_slots.get(index))
                 .map(|slot| slot.view.clone())
-                .unwrap_or_else(|| texture_slots.last().unwrap().view.clone());
+                .unwrap_or_else(|| fallback_view.clone());
             let toon_view = if material.toon_reference == 0 {
                 usize::try_from(material.toon_index)
                     .ok()
@@ -338,12 +322,12 @@ impl Renderer {
                     .or_else(|| toon_slots.first())
             }
             .map(|slot| slot.view.clone())
-            .unwrap_or_else(|| texture_slots.last().unwrap().view.clone());
+            .unwrap_or_else(|| fallback_view.clone());
             let sphere_view = material
                 .sphere_index
                 .and_then(|index| texture_slots.get(index))
                 .map(|slot| slot.view.clone())
-                .unwrap_or_else(|| texture_slots.last().unwrap().view.clone());
+                .unwrap_or_else(|| fallback_view.clone());
             material_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(&format!("material {}", material.name)),
                 layout: &material_layout,
@@ -384,42 +368,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<MeshVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 24,
-                            shader_location: 2,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 36,
-                            shader_location: 3,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32x4,
-                            offset: 44,
-                            shader_location: 4,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 60,
-                            shader_location: 5,
-                        },
-                    ],
-                })],
+                buffers: &[Some(vertex_layout())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -433,13 +382,7 @@ impl Renderer {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
+            depth_stencil: Some(depth_state(true)),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -451,42 +394,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &outline_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<MeshVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 24,
-                            shader_location: 2,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 36,
-                            shader_location: 3,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32x4,
-                            offset: 44,
-                            shader_location: 4,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 60,
-                            shader_location: 5,
-                        },
-                    ],
-                })],
+                buffers: &[Some(vertex_layout())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -503,13 +411,7 @@ impl Renderer {
                 cull_mode: Some(wgpu::Face::Front),
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
+            depth_stencil: Some(depth_state(true)),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -563,6 +465,13 @@ impl Renderer {
         })
     }
 
+    fn recreate_depth(&mut self, width: u32, height: u32) {
+        self.depth_texture = create_depth_texture(&self.device, width, height);
+        self.depth_view = self
+            .depth_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+    }
+
     pub fn resize(&mut self, size: (u32, u32)) {
         if size.0 == 0 || size.1 == 0 {
             return;
@@ -573,10 +482,7 @@ impl Renderer {
         self.config.width = size.0;
         self.config.height = size.1;
         self.surface.configure(&self.device, &self.config);
-        self.depth_texture = create_depth_texture(&self.device, size.0, size.1);
-        self.depth_view = self
-            .depth_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.recreate_depth(size.0, size.1);
         self.camera.set_viewport(size.0, size.1);
         if let Some(overlay) = &mut self.fps_overlay {
             overlay.update(&self.queue, size, Instant::now());
@@ -618,11 +524,8 @@ impl Renderer {
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
-                self.depth_texture =
-                    create_depth_texture(&self.device, self.config.width, self.config.height);
-                self.depth_view = self
-                    .depth_texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let (width, height) = (self.config.width, self.config.height);
+                self.recreate_depth(width, height);
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Lost => {
@@ -675,37 +578,13 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            for group in &self.groups {
-                if group.index_count == 0 {
-                    continue;
-                }
-                if let Some(bind_group) = self.material_bind_groups.get(group.material_index) {
-                    pass.set_bind_group(1, bind_group, &[]);
-                }
-                pass.draw_indexed(
-                    group.index_start as u32..(group.index_start + group.index_count) as u32,
-                    0,
-                    0..1,
-                );
-            }
+            draw_material_groups(&mut pass, &self.groups, &self.material_bind_groups);
 
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            for group in &self.groups {
-                if group.index_count == 0 {
-                    continue;
-                }
-                if let Some(bind_group) = self.material_bind_groups.get(group.material_index) {
-                    pass.set_bind_group(1, bind_group, &[]);
-                }
-                pass.draw_indexed(
-                    group.index_start as u32..(group.index_start + group.index_count) as u32,
-                    0,
-                    0..1,
-                );
-            }
+            draw_material_groups(&mut pass, &self.groups, &self.material_bind_groups);
 
             if let Some(overlay) = &self.fps_overlay {
                 if let Err(error) = overlay.render(&mut pass) {

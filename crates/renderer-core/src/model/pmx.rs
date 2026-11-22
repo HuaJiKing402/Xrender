@@ -378,7 +378,7 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         }
     }
 
-    let mut mesh = Mesh {
+    let mesh = Mesh {
         name: model_name,
         vertices,
         indices,
@@ -387,9 +387,7 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         texture_paths,
         bones,
     };
-    mesh.ensure_default_materials();
-    mesh.normalize();
-    Ok(mesh)
+    Ok(mesh.finish())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
