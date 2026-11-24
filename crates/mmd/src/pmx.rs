@@ -112,9 +112,11 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn read_bone_index(reader: &mut Reader<'_>, size: u8, what: &str) -> Result<u32> {
+const INVALID_BONE_INDEX: u32 = u32::MAX;
+
+fn read_bone_index(reader: &mut Reader<'_>, size: u8, what: &str) -> Result<Option<u32>> {
     let index = reader.signed_index(size, what)?;
-    Ok(usize::try_from(index).unwrap_or(0) as u32)
+    Ok(u32::try_from(index).ok())
 }
 
 /// 解析 PMX 2.0 / 2.1 的几何与材质颜色。
@@ -177,28 +179,43 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         let mut bone_weights = [0.0f32; 4];
         match deform_type {
             0 => {
-                bone_indices[0] = read_bone_index(&mut reader, bone_index_size, "BDEF1 bone")?;
-                bone_weights[0] = 1.0;
+                let bone = read_bone_index(&mut reader, bone_index_size, "BDEF1 bone")?;
+                bone_indices[0] = bone.unwrap_or(INVALID_BONE_INDEX);
+                bone_weights[0] = if bone.is_some() { 1.0 } else { 0.0 };
             }
             1 => {
-                bone_indices[0] = read_bone_index(&mut reader, bone_index_size, "BDEF2 bone 1")?;
-                bone_indices[1] = read_bone_index(&mut reader, bone_index_size, "BDEF2 bone 2")?;
+                let bone_0 = read_bone_index(&mut reader, bone_index_size, "BDEF2 bone 1")?;
+                let bone_1 = read_bone_index(&mut reader, bone_index_size, "BDEF2 bone 2")?;
                 let w = reader.f32("BDEF2 weight")?;
-                bone_weights = [w, 1.0 - w, 0.0, 0.0];
+                bone_indices[0] = bone_0.unwrap_or(INVALID_BONE_INDEX);
+                bone_indices[1] = bone_1.unwrap_or(INVALID_BONE_INDEX);
+                bone_weights = [
+                    if bone_0.is_some() { w } else { 0.0 },
+                    if bone_1.is_some() { 1.0 - w } else { 0.0 },
+                    0.0,
+                    0.0,
+                ];
             }
             2 | 4 => {
-                for index in &mut bone_indices {
-                    *index = read_bone_index(&mut reader, bone_index_size, "BDEF4/QDEF bone")?;
-                }
-                for weight in &mut bone_weights {
-                    *weight = reader.f32("BDEF4/QDEF weight")?;
+                for slot in 0..4 {
+                    let bone = read_bone_index(&mut reader, bone_index_size, "BDEF4/QDEF bone")?;
+                    bone_indices[slot] = bone.unwrap_or(INVALID_BONE_INDEX);
+                    let weight = reader.f32("BDEF4/QDEF weight")?;
+                    bone_weights[slot] = if bone.is_some() { weight } else { 0.0 };
                 }
             }
             3 => {
-                bone_indices[0] = read_bone_index(&mut reader, bone_index_size, "SDEF bone 1")?;
-                bone_indices[1] = read_bone_index(&mut reader, bone_index_size, "SDEF bone 2")?;
+                let bone_0 = read_bone_index(&mut reader, bone_index_size, "SDEF bone 1")?;
+                let bone_1 = read_bone_index(&mut reader, bone_index_size, "SDEF bone 2")?;
                 let w = reader.f32("SDEF weight")?;
-                bone_weights = [w, 1.0 - w, 0.0, 0.0];
+                bone_indices[0] = bone_0.unwrap_or(INVALID_BONE_INDEX);
+                bone_indices[1] = bone_1.unwrap_or(INVALID_BONE_INDEX);
+                bone_weights = [
+                    if bone_0.is_some() { w } else { 0.0 },
+                    if bone_1.is_some() { 1.0 - w } else { 0.0 },
+                    0.0,
+                    0.0,
+                ];
                 reader.take(36, "SDEF C/R0/R1")?;
             }
             other => bail!("unsupported PMX deform type {other} at vertex {i}"),
@@ -389,4 +406,19 @@ pub fn load_pmx_from_path(path: impl AsRef<std::path::Path>) -> Result<Mesh> {
         .and_then(|s| s.to_str())
         .unwrap_or("pmx-model");
     load_pmx(&bytes, fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_bone_index_is_none() {
+        let bytes = [0xff];
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(
+            read_bone_index(&mut reader, 1, "bone").expect("index"),
+            None
+        );
+    }
 }

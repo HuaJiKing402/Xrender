@@ -6,6 +6,24 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> bone_matrices: array<mat4x4<f32>>;
 
+const INVALID_BONE_INDEX: u32 = 4294967295u;
+
+fn identity_matrix() -> mat4x4<f32> {
+    return mat4x4<f32>(
+        vec4<f32>(1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, 1.0, 0.0),
+        vec4<f32>(0.0, 0.0, 0.0, 1.0),
+    );
+}
+
+fn bone_matrix(index: u32) -> mat4x4<f32> {
+    if (index == INVALID_BONE_INDEX) {
+        return identity_matrix();
+    }
+    return bone_matrices[index];
+}
+
 struct MaterialParams {
     diffuse: vec4<f32>,
     edge_color: vec4<f32>,
@@ -32,12 +50,15 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
-    let total = max(input.bone_weights.x + input.bone_weights.y + input.bone_weights.z + input.bone_weights.w, 0.00001);
-    let w = input.bone_weights / total;
-    let skin = bone_matrices[input.bone_indices.x] * w.x
-        + bone_matrices[input.bone_indices.y] * w.y
-        + bone_matrices[input.bone_indices.z] * w.z
-        + bone_matrices[input.bone_indices.w] * w.w;
+    let total = input.bone_weights.x + input.bone_weights.y + input.bone_weights.z + input.bone_weights.w;
+    var skin = identity_matrix();
+    if (total > 0.0001) {
+        let w = input.bone_weights / total;
+        skin = bone_matrix(input.bone_indices.x) * w.x
+            + bone_matrix(input.bone_indices.y) * w.y
+            + bone_matrix(input.bone_indices.z) * w.z
+            + bone_matrix(input.bone_indices.w) * w.w;
+    }
     let skinned = skin * vec4<f32>(input.position, 1.0);
     var output: VertexOutput;
     output.position = uniforms.mvp * skinned;
