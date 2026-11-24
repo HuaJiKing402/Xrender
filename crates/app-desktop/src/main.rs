@@ -2,7 +2,7 @@ use std::{
     env,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -12,10 +12,12 @@ use winit::{
     application::ApplicationHandler,
     dpi::PhysicalPosition,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
     window::{Window, WindowId},
 };
+
+const INTERACTIVE_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 fn max_frames_from_env() -> Option<u32> {
     env::var("MAX_FRAMES")
@@ -49,6 +51,7 @@ struct App {
     vmd_path: Option<String>,
     max_frames: Option<u32>,
     frame_count: u32,
+    last_frame: Option<Instant>,
     drag_button: Option<MouseButton>,
     last_cursor: Option<PhysicalPosition<f64>>,
     error: Option<String>,
@@ -115,7 +118,6 @@ impl ApplicationHandler for App {
             mesh.texture_paths.len(),
             mesh.bones.len()
         );
-
         let texture_base_dir = self
             .model_path
             .as_deref()
@@ -179,6 +181,7 @@ impl ApplicationHandler for App {
 
         self.window = Some(window);
         self.renderer = Some(renderer);
+        self.last_frame = Some(Instant::now());
     }
 
     fn window_event(
@@ -270,17 +273,28 @@ impl ApplicationHandler for App {
                         event_loop.exit();
                     }
                 }
-                if self.max_frames.is_none() {
-                    std::thread::sleep(Duration::from_millis(16));
-                }
+                self.last_frame = Some(Instant::now());
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(window) = &self.window {
-            window.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.max_frames.is_some() || self.error.is_some() {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            return;
+        }
+
+        let deadline = self.last_frame.unwrap_or_else(Instant::now) + INTERACTIVE_FRAME_INTERVAL;
+        if Instant::now() >= deadline {
+            self.last_frame = Some(Instant::now());
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
     }
 }
