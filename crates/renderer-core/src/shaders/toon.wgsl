@@ -89,11 +89,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let ambient = clamp(material.ambient.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     let base = input.color * material.diffuse.rgb * texel.rgb;
     var color = base * (ambient + toon * (vec3<f32>(1.0) - ambient));
-    // specular_strength 在 PMX 中作为高光指数；乘数固定。
-    let half_direction = normalize(light_direction + view_direction);
-    let specular_exponent = clamp(material.specular.w, 1.0, 100.0);
-    let specular = pow(max(dot(normal, half_direction), 0.0), specular_exponent);
-    color += material.specular.rgb * specular;
+    // specular_strength 在 PMX 里是高光指数；0 表示关闭高光。
+    // 直接 clamp 到 1 会把"关闭"变成一层铺满整个表面的宽高光，所以先门控。
+    if (material.specular.w > 0.0) {
+        let half_direction = normalize(light_direction + view_direction);
+        let specular_exponent = clamp(material.specular.w, 1.0, 100.0);
+        let highlight = pow(max(dot(normal, half_direction), 0.0), specular_exponent);
+        color += material.specular.rgb * highlight;
+    }
 
     let sphere_mode = u32(material.params.y);
     let sphere_enabled = material.params.z > 0.5;
@@ -108,5 +111,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             color = color + sphere;
         }
     }
+    // 高光与 sphere 加算都可能把颜色推出 [0,1]，统一在出口钳制。
+    color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(color, alpha);
 }
