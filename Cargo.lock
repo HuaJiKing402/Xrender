@@ -193,6 +193,7 @@ dependencies = [
  "anyhow",
  "env_logger",
  "log",
+ "mmd",
  "pollster",
  "renderer-core",
  "winit",
@@ -1521,6 +1522,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "encoding_rs",
+ "glam",
+ "renderer-core",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2495,7 +2506,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
- "encoding_rs",
  "glam",
  "gltf",
  "glyphon",

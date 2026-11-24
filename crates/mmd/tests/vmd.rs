@@ -1,13 +1,14 @@
 use std::iter;
 
 use glam::Quat;
-use renderer_core::{animation::VmdClip, model::Bone};
+use mmd::vmd::parse_vmd;
+use renderer_core::model::Bone;
 
 fn padded(bytes: &[u8], len: usize) -> Vec<u8> {
     bytes
         .iter()
         .copied()
-        .chain(iter::repeat(0).take(len.saturating_sub(bytes.len())))
+        .chain(iter::repeat_n(0, len.saturating_sub(bytes.len())))
         .take(len)
         .collect()
 }
@@ -28,7 +29,7 @@ fn vmd_bytes() -> Vec<u8> {
         for value in [q.x, q.y, q.z, q.w] {
             out.extend(value.to_le_bytes());
         }
-        out.extend(iter::repeat(0).take(64));
+        out.extend(iter::repeat_n(0, 64));
     }
 
     out.extend(0u32.to_le_bytes());
@@ -39,8 +40,8 @@ fn vmd_bytes() -> Vec<u8> {
 
 #[test]
 fn parses_vmd_and_samples_rotation() {
-    let clip = VmdClip::parse(&vmd_bytes()).expect("VMD should parse");
-    assert_eq!(clip.model_name, "test");
+    let clip = parse_vmd(&vmd_bytes()).expect("VMD should parse");
+    assert_eq!(clip.name, "test");
     assert_eq!(clip.bone_tracks["bone"].len(), 3);
 
     let bones = vec![Bone {

@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
-
-use super::{Bone, MaterialGroup, MaterialProfile, Mesh, MeshVertex, OutlineStyle, ShadingData};
+use renderer_core::model::{
+    Bone, MaterialGroup, MaterialProfile, Mesh, MeshVertex, OutlineStyle, ShadingData,
+};
 
 struct Reader<'a> {
     data: &'a [u8],
@@ -288,7 +289,7 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
                 color: edge_color,
                 scale: edge_scale,
             }),
-            shading: ShadingData::Mmd(crate::mmd::MmdMaterial {
+            shading: ShadingData::Mmd(renderer_core::mmd::MmdMaterial {
                 toon_reference,
                 toon_index,
                 sphere_index: usize::try_from(environment_index).ok(),

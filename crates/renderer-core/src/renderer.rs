@@ -5,7 +5,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::{
-    animation::VmdClip,
+    animation::AnimationClip,
     backend::BACKEND_LABEL,
     camera::OrbitCamera,
     material::create_material_state,
@@ -51,7 +51,7 @@ pub struct Renderer {
     uniform_buffer: wgpu::Buffer,
     bone_buffer: wgpu::Buffer,
     bones: Vec<Bone>,
-    animation: Option<VmdClip>,
+    animation: Option<AnimationClip>,
     material_bind_groups: Vec<wgpu::BindGroup>,
     material_transparent: Vec<bool>,
     material_outline: Vec<bool>,
@@ -556,7 +556,7 @@ impl Renderer {
         self.bones.len()
     }
 
-    pub fn set_animation(&mut self, clip: VmdClip) {
+    pub fn set_animation(&mut self, clip: AnimationClip) {
         self.animation = Some(clip);
     }
 

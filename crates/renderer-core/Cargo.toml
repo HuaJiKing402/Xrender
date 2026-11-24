@@ -12,7 +12,6 @@ bytemuck.workspace = true
 glam.workspace = true
 gltf.workspace = true
 image.workspace = true
-encoding_rs.workspace = true
 glyphon.workspace = true
 
 [features]

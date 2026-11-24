@@ -1,0 +1,14 @@
+[package]
+name = "mmd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+renderer-core = { path = "../renderer-core", default-features = false }
+anyhow.workspace = true
+glam.workspace = true
+encoding_rs.workspace = true
+
+[dev-dependencies]
+renderer-core = { path = "../renderer-core", default-features = false, features = ["backend-vulkan"] }

@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 renderer-core = { path = "../renderer-core", default-features = false, features = ["backend-vulkan"] }
+mmd = { path = "../mmd" }
 winit.workspace = true
 anyhow.workspace = true
 log.workspace = true

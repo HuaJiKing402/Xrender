@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 
 pub mod gltf;
 pub mod obj;
-pub mod pmx;
 pub mod texture;
 
 pub use obj::load_obj;
@@ -198,8 +197,8 @@ impl Mesh {
         self
     }
 
-    /// PMX 等已有法线的模型：补默认材质并归一化，不改法线。
-    pub(crate) fn finish(mut self) -> Self {
+    /// 已有法线的模型（PMX 等）：补默认材质并归一化，不改法线。
+    pub fn finish(mut self) -> Self {
         self.ensure_default_materials();
         self.normalize();
         self
@@ -264,7 +263,9 @@ pub(crate) fn color_from_normal(normal: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// 按扩展名加载自定义模型：OBJ / glTF / GLB / PMX。
+/// 按扩展名加载自定义模型：OBJ / glTF / GLB。
+///
+/// 格式特有的装载器（PMX 等）放在各自的资源 crate 里，内核只处理这里的通用格式。
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_from_path(path: impl AsRef<std::path::Path>) -> Result<Mesh> {
     let path = path.as_ref();
@@ -276,9 +277,8 @@ pub fn load_from_path(path: impl AsRef<std::path::Path>) -> Result<Mesh> {
     match extension.as_str() {
         "obj" => obj::load_from_path(path),
         "gltf" | "glb" => gltf::load_from_path(path),
-        "pmx" => pmx::load_pmx_from_path(path),
         other => Err(anyhow!(
-            "unsupported model format: .{other} (use obj/gltf/glb/pmx)"
+            "unsupported model format: .{other} (use obj/gltf/glb)"
         )),
     }
 }

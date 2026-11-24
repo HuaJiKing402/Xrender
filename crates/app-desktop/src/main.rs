@@ -6,7 +6,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use renderer_core::{animation::VmdClip, backend, model, Renderer};
+use mmd::vmd;
+use renderer_core::{backend, model, Renderer};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalPosition,
@@ -29,6 +30,15 @@ fn model_path_from_args_or_env() -> Option<String> {
 
 fn vmd_path_from_args_or_env() -> Option<String> {
     env::args().nth(2).or_else(|| env::var("VMD_PATH").ok())
+}
+
+/// MMD 专有格式（PMX）走资源层，其余交给内核的通用装载器。
+fn load_model(path: &str) -> Result<model::Mesh> {
+    if path.to_ascii_lowercase().ends_with(".pmx") {
+        mmd::pmx::load_pmx_from_path(path)
+    } else {
+        model::load_from_path(path)
+    }
 }
 
 #[derive(Default)]
@@ -84,7 +94,7 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
 
         let mesh = match &self.model_path {
-            Some(path) => match model::load_from_path(path) {
+            Some(path) => match load_model(path) {
                 Ok(mesh) => mesh,
                 Err(error) => {
                     self.fail(
@@ -138,7 +148,7 @@ impl ApplicationHandler for App {
                     return;
                 }
             };
-            let clip = match VmdClip::parse(&bytes) {
+            let clip = match vmd::parse_vmd(&bytes) {
                 Ok(clip) => clip,
                 Err(error) => {
                     self.fail(event_loop, format!("failed to parse VMD {path}: {error:#}"));
@@ -147,7 +157,7 @@ impl ApplicationHandler for App {
             };
             println!(
                 "Animation: {} ({} bone tracks)",
-                clip.model_name,
+                clip.name,
                 clip.bone_tracks.len()
             );
             renderer.set_animation(clip);
