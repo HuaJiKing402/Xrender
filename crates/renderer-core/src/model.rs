@@ -29,25 +29,49 @@ pub struct Bone {
     pub flags: u16,
 }
 
-/// PMX 材质参数（v0.4 先使用 diffuse/texture，其他字段为后续 Toon 阶段准备）。
+/// 描边设置：内核只认"要不要描边 + 颜色 + 宽度"，怎么画由管线决定。
 #[derive(Clone, Debug)]
-pub struct Material {
+pub struct OutlineStyle {
+    pub color: [f32; 4],
+    pub scale: f32,
+}
+
+impl Default for OutlineStyle {
+    fn default() -> Self {
+        Self {
+            color: [0.0, 0.0, 0.0, 1.0],
+            scale: 0.012,
+        }
+    }
+}
+
+/// 着色模型及其私有参数。
+///
+/// 内核按枚举分发到对应的管线与材质绑定，不理解 toon / sphere 之类的细节；
+/// 换着色模型只是在这里加一个分支，不需要改 `renderer` / `material`。
+#[derive(Clone, Debug)]
+pub enum ShadingData {
+    /// 无光照扩展：贴图 × diffuse，不做 toon 斜坡。
+    Unlit,
+    /// MMD 的 toon + sphere 体系。
+    Mmd(crate::mmd::MmdMaterial),
+}
+
+/// 通用材质：与模型格式无关的字段 + 一个着色模型扩展槽。
+#[derive(Clone, Debug)]
+pub struct MaterialProfile {
     pub name: String,
     pub diffuse: [f32; 4],
     pub ambient: [f32; 3],
     pub specular: [f32; 3],
     pub specular_strength: f32,
     pub texture_index: Option<usize>,
-    pub sphere_index: Option<usize>,
-    pub sphere_mode: u8,
-    pub toon_reference: u8,
-    pub toon_index: i32,
-    pub flags: u8,
-    pub edge_color: [f32; 4],
-    pub edge_scale: f32,
+    pub outline: Option<OutlineStyle>,
+    pub shading: ShadingData,
 }
 
-impl Material {
+impl MaterialProfile {
+    /// 没有材质信息的格式（OBJ / glTF / 内置图形）使用的默认形态。
     pub fn opaque() -> Self {
         Self {
             name: "default".into(),
@@ -56,13 +80,8 @@ impl Material {
             specular: [0.0, 0.0, 0.0],
             specular_strength: 0.0,
             texture_index: None,
-            sphere_index: None,
-            sphere_mode: 0,
-            toon_reference: 0,
-            toon_index: 0,
-            flags: 0,
-            edge_color: [0.0, 0.0, 0.0, 1.0],
-            edge_scale: 1.0,
+            outline: None,
+            shading: ShadingData::Unlit,
         }
     }
 }
@@ -81,7 +100,7 @@ pub struct Mesh {
     pub name: String,
     pub vertices: Vec<MeshVertex>,
     pub indices: Vec<u32>,
-    pub materials: Vec<Material>,
+    pub materials: Vec<MaterialProfile>,
     pub groups: Vec<MaterialGroup>,
     pub texture_paths: Vec<String>,
     pub bones: Vec<Bone>,
@@ -120,7 +139,7 @@ impl Mesh {
                 },
             ],
             indices: vec![0, 1, 2],
-            materials: vec![Material::opaque()],
+            materials: vec![MaterialProfile::opaque()],
             groups: vec![MaterialGroup {
                 material_index: 0,
                 index_start: 0,
@@ -134,7 +153,7 @@ impl Mesh {
     /// 为没有材质信息的格式补一个覆盖全部索引的默认材质。
     pub fn ensure_default_materials(&mut self) -> &mut Self {
         if self.materials.is_empty() {
-            self.materials.push(Material::opaque());
+            self.materials.push(MaterialProfile::opaque());
         }
         if self.groups.is_empty() {
             self.groups.push(MaterialGroup {

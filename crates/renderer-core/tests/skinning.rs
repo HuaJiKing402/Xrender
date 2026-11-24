@@ -1,6 +1,6 @@
 use glam::{Quat, Vec3};
 use renderer_core::{
-    model::{Bone, Material, MaterialGroup, Mesh, MeshVertex},
+    model::{Bone, MaterialGroup, MaterialProfile, Mesh, MeshVertex},
     skinning::{compute_bone_matrices, Pose},
 };
 
@@ -50,7 +50,7 @@ fn normalize_moves_bones_with_vertices() {
         name: "test".into(),
         vertices: vec![vertex([-1.0, 0.0, 0.0]), vertex([1.0, 2.0, 0.0])],
         indices: vec![0, 1, 0],
-        materials: vec![Material::opaque()],
+        materials: vec![MaterialProfile::opaque()],
         groups: vec![MaterialGroup {
             material_index: 0,
             index_start: 0,

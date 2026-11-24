@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 
-use super::{Bone, Material, MaterialGroup, Mesh, MeshVertex};
+use super::{Bone, MaterialGroup, MaterialProfile, Mesh, MeshVertex, OutlineStyle, ShadingData};
 
 struct Reader<'a> {
     data: &'a [u8],
@@ -272,7 +272,7 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         }
 
         let material_index = materials.len();
-        materials.push(Material {
+        materials.push(MaterialProfile {
             name: if !name_universal.is_empty() {
                 name_universal
             } else {
@@ -283,13 +283,18 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
             specular,
             specular_strength,
             texture_index: usize::try_from(texture_index).ok(),
-            sphere_index: usize::try_from(environment_index).ok(),
-            sphere_mode,
-            toon_reference,
-            toon_index,
-            flags,
-            edge_color,
-            edge_scale,
+            // PMX 的描边开关是 flags & 0x10；其余标志位留给 MmdMaterial。
+            outline: (flags & 0x10 != 0).then_some(OutlineStyle {
+                color: edge_color,
+                scale: edge_scale,
+            }),
+            shading: ShadingData::Mmd(crate::mmd::MmdMaterial {
+                toon_reference,
+                toon_index,
+                sphere_index: usize::try_from(environment_index).ok(),
+                sphere_mode,
+                flags,
+            }),
         });
         groups.push(MaterialGroup {
             material_index,

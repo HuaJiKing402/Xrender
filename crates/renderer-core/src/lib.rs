@@ -3,6 +3,7 @@ pub mod backend;
 pub mod camera;
 mod fps;
 mod material;
+pub mod mmd;
 pub mod model;
 mod overlay;
 mod pipeline;
