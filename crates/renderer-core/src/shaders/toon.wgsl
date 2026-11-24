@@ -110,10 +110,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // MMD 的像素合成：贴图 × (diffuse × 光照 + ambient) × toon。
-    // ambient 是独立的环境/自发光项，不能被 toon 二次压暗；
+    // MMD 的像素合成：贴图 × (diffuse + ambient) × toon ramp。
+    // authored ambient/emissive 与 diffuse 相加后一起被 ramp 调制；
+    // shade (N·L) 只用于生成 ramp 采样坐标，不再单独乘 diffuse，否则暗部被压暗两次。
     // 若模型 ambient 是异常常量，应在 PMX 数据侧处理，而不是在 shader 里丢掉。
-    let base = input.color * texel.rgb * (material.diffuse.rgb * shade + material.ambient.rgb);
+    let base = input.color * texel.rgb * (material.diffuse.rgb + material.ambient.rgb);
     var color = base * toon;
     // specular_strength 在 PMX 里是高光指数；0 表示关闭高光。
     // 直接 clamp 到 1 会把"关闭"变成一层铺满整个表面的宽高光，所以先门控。
