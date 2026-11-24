@@ -82,8 +82,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // MMD 材质：toon 作为明暗，ambient 作为环境补光，specular 用 Blinn-Phong。
-    var color = input.color * material.diffuse.rgb * texel.rgb * (material.ambient.rgb + toon);
+    // MMD 材质：ambient 是"暗部地板"，而不是和 toon 一起叠乘的增益。
+    // 旧写法 base*(ambient+toon) 会把 ambient=0.5 的材质亮面推到 1.5× 过曝。
+    let ambient = clamp(material.ambient.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    let base = input.color * material.diffuse.rgb * texel.rgb;
+    var color = base * (ambient + toon * (vec3<f32>(1.0) - ambient));
     // specular_strength 在 PMX 中作为高光指数；乘数固定。
     let half_direction = normalize(light_direction + view_direction);
     let specular_exponent = clamp(material.specular.w, 1.0, 100.0);
