@@ -9,6 +9,75 @@ use crate::model::{MaterialGroup, MeshVertex};
 
 pub(crate) const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
+const BLIT_SOURCE: &str = include_str!("shaders/blit.wgsl");
+
+/// blit 的贴图绑定：group 0 只有一张离屏颜色 + 一个采样器，与场景的
+/// uniform / 骨骼 / 材质三组无关，所以用独立的 layout。
+pub(crate) fn blit_bind_group_layout(device: &Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("blit bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+pub(crate) fn create_blit_pipeline(
+    device: &Device,
+    layout: &wgpu::BindGroupLayout,
+    format: TextureFormat,
+) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("blit.wgsl"),
+        source: wgpu::ShaderSource::Wgsl(BLIT_SOURCE.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("blit pipeline layout"),
+        bind_group_layouts: &[Some(layout)],
+        ..Default::default()
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("blit pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 static ATTRIBUTES: [VertexAttribute; 6] = [
     VertexAttribute {
         format: VertexFormat::Float32x3,
@@ -65,6 +134,32 @@ pub(crate) fn depth_state_with(
         stencil: Default::default(),
         bias: Default::default(),
     }
+}
+
+/// 离屏场景颜色目标。格式与 surface 一致，这样 blit 不需要做格式转换，
+/// 颜色在 sRGB 目标上做一次线性→编码的往返，结果与直接画到 surface 等同。
+pub(crate) fn create_scene_color(
+    device: &Device,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+) -> Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("scene color"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
 }
 
 pub(crate) fn create_depth_texture(device: &Device, width: u32, height: u32) -> Texture {

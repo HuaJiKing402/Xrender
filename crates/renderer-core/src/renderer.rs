@@ -16,8 +16,9 @@ use crate::{
     overlay::FpsOverlay,
     pipeline::{PipelineCache, ScenePipelineKeys},
     renderer_helpers::{
-        create_depth_texture, draw_opaque_groups, draw_outline_groups,
-        draw_transparent_groups_ordered, group_centers, transparent_order,
+        blit_bind_group_layout, create_blit_pipeline, create_depth_texture, create_scene_color,
+        draw_opaque_groups, draw_outline_groups, draw_transparent_groups_ordered, group_centers,
+        transparent_order,
     },
     skinning::{compute_bone_matrices, Pose},
 };
@@ -66,6 +67,13 @@ pub struct Renderer {
     index_buffer: wgpu::Buffer,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// 场景颜色先画到这里，再由 blit pass 搬到 surface。
+    scene_color: wgpu::Texture,
+    scene_color_view: wgpu::TextureView,
+    blit_layout: wgpu::BindGroupLayout,
+    blit_sampler: wgpu::Sampler,
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_bind_group: wgpu::BindGroup,
     fps_overlay: Option<FpsOverlay>,
     camera: OrbitCamera,
     groups: Vec<crate::model::MaterialGroup>,
@@ -343,6 +351,36 @@ impl Renderer {
         let depth_texture = create_depth_texture(&device, size.0, size.1);
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // 离屏颜色目标 + 搬运管线：渲染先落到自己的颜色纹理，再 blit 到 surface。
+        let scene_color = create_scene_color(&device, size.0, size.1, format);
+        let scene_color_view =
+            scene_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let blit_layout = blit_bind_group_layout(&device);
+        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("blit sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let blit_pipeline = create_blit_pipeline(&device, &blit_layout, format);
+        let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("blit bind group"),
+            layout: &blit_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&scene_color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&blit_sampler),
+                },
+            ],
+        });
+
         Ok(Self {
             instance,
             adapter_name,
@@ -367,6 +405,12 @@ impl Renderer {
             index_buffer,
             depth_texture,
             depth_view,
+            scene_color,
+            scene_color_view,
+            blit_layout,
+            blit_sampler,
+            blit_pipeline,
+            blit_bind_group,
             fps_overlay: None,
             camera: {
                 let mut camera = OrbitCamera::default();
@@ -381,11 +425,30 @@ impl Renderer {
         })
     }
 
-    fn recreate_depth(&mut self, width: u32, height: u32) {
+    /// 尺寸变化时重建所有与分辨率绑定的目标：深度、离屏颜色、blit 绑定。
+    fn recreate_targets(&mut self, width: u32, height: u32) {
         self.depth_texture = create_depth_texture(&self.device, width, height);
         self.depth_view = self
             .depth_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        self.scene_color = create_scene_color(&self.device, width, height, self.config.format);
+        self.scene_color_view = self
+            .scene_color
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("blit bind group"),
+            layout: &self.blit_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.scene_color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.blit_sampler),
+                },
+            ],
+        });
     }
 
     pub fn resize(&mut self, size: (u32, u32)) {
@@ -398,7 +461,7 @@ impl Renderer {
         self.config.width = size.0;
         self.config.height = size.1;
         self.surface.configure(&self.device, &self.config);
-        self.recreate_depth(size.0, size.1);
+        self.recreate_targets(size.0, size.1);
         self.camera.set_viewport(size.0, size.1);
         if let Some(overlay) = &mut self.fps_overlay {
             overlay.update(&self.queue, size, Instant::now());
@@ -452,7 +515,7 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
                 let (width, height) = (self.config.width, self.config.height);
-                self.recreate_depth(width, height);
+                self.recreate_targets(width, height);
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Lost => {
@@ -476,7 +539,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mesh pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view_texture,
+                    view: &self.scene_color_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -547,6 +610,30 @@ impl Renderer {
                     log::warn!("{error:#}");
                 }
             }
+        }
+
+        // 把离屏结果搬到 surface。这一步目前是纯搬运，但颜色目标已经独立，
+        // 后处理 / 截图 / 缩略图都可以挂在这条链上。
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blit pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view_texture,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &self.blit_bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         self.queue.submit(Some(encoder.finish()));
