@@ -98,6 +98,7 @@ pub(crate) fn create_material_state(
                     .ok()
                     .and_then(|index| toon_slots.get(index))
             }
+            .or_else(|| toon_slots.first())
             .map(|slot| slot.view.clone())
             .unwrap_or_else(|| fallback_view.clone());
             let sphere_view = sphere_view.unwrap_or_else(|| fallback_view.clone());
