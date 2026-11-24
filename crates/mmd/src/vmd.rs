@@ -6,7 +6,9 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 use glam::{Quat, Vec3};
-use renderer_core::animation::{AnimationClip, BoneKeyframe, MorphKeyframe};
+use renderer_core::animation::{
+    AnimationClip, BezierCurve, BoneInterpolation, BoneKeyframe, MorphKeyframe,
+};
 
 struct Cursor<'a> {
     data: &'a [u8],
@@ -48,6 +50,20 @@ impl<'a> Cursor<'a> {
     }
 }
 
+fn interpolation_curve(bytes: &[u8]) -> BezierCurve {
+    let points = [bytes[0], bytes[1], bytes[2], bytes[3]];
+    // 部分 VMD 的插值区全 0；这不是有效的贝塞尔控制点，回退默认曲线。
+    if points == [0; 4] {
+        return BezierCurve::default();
+    }
+    BezierCurve::new(
+        points[0] as f32 / 127.0,
+        points[1] as f32 / 127.0,
+        points[2] as f32 / 127.0,
+        points[3] as f32 / 127.0,
+    )
+}
+
 /// 解析 VMD 运动文件的骨骼/表情轨道；相机/灯光帧仅跳过。
 pub fn parse_vmd(bytes: &[u8]) -> Result<AnimationClip> {
     let mut cursor = Cursor::new(bytes);
@@ -67,7 +83,13 @@ pub fn parse_vmd(bytes: &[u8]) -> Result<AnimationClip> {
         let y = cursor.f32("bone quaternion y")?;
         let z = cursor.f32("bone quaternion z")?;
         let w = cursor.f32("bone quaternion w")?;
-        cursor.take(64, "bone interpolation")?;
+        let interpolation = cursor.take(64, "bone interpolation")?;
+        let interpolation = BoneInterpolation {
+            x: interpolation_curve(&interpolation[0..4]),
+            y: interpolation_curve(&interpolation[4..8]),
+            z: interpolation_curve(&interpolation[8..12]),
+            rotation: interpolation_curve(&interpolation[12..16]),
+        };
         let rotation = Quat::from_xyzw(x, y, z, w);
         bone_tracks
             .entry(bone_name)
@@ -76,6 +98,7 @@ pub fn parse_vmd(bytes: &[u8]) -> Result<AnimationClip> {
                 frame,
                 position,
                 rotation,
+                interpolation,
             });
     }
 
