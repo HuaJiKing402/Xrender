@@ -130,6 +130,7 @@ pub(crate) fn create_material_state(
                     if sphere_enabled { 1.0 } else { 0.0 },
                     if blend { 0.01 } else { 0.5 },
                 ],
+                // ambient.rgb 是 PMX 材质的环境/自发光色，参与光照加算；
                 // ambient.w 复用为 toon 采样编码，见 `ToonSampling::code`。
                 ambient: [ambient[0], ambient[1], ambient[2], toon_code],
                 specular,

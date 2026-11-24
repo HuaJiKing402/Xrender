@@ -110,11 +110,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // ramp 直接当乘数：亮部白色 → 原色，暗部影色 → 乘上影色。
-    // 官方 toon01 的影色是 205 灰左右，乘上去就是 MMD 的硬边阴影；
-    // 这个模型所有材质的 ambient 都是常量 0.5，再叠一层只会把阴影整体抬亮，
-    // 所以 ambient 不再参与 toon 明暗（阴影色完全由 ramp 决定）。
-    let base = input.color * material.diffuse.rgb * texel.rgb;
+    // MMD 的像素合成：贴图 × (diffuse × 光照 + ambient) × toon。
+    // ambient 是独立的环境/自发光项，不能被 toon 二次压暗；
+    // 若模型 ambient 是异常常量，应在 PMX 数据侧处理，而不是在 shader 里丢掉。
+    let base = input.color * texel.rgb * (material.diffuse.rgb * shade + material.ambient.rgb);
     var color = base * toon;
     // specular_strength 在 PMX 里是高光指数；0 表示关闭高光。
     // 直接 clamp 到 1 会把"关闭"变成一层铺满整个表面的宽高光，所以先门控。
