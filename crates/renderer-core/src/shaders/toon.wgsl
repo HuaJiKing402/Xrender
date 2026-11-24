@@ -21,6 +21,8 @@ struct MaterialParams {
 @group(1) @binding(2) var diffuse_sampler: sampler;
 @group(1) @binding(3) var toon_texture: texture_2d<f32>;
 @group(1) @binding(4) var sphere_texture: texture_2d<f32>;
+// toon 图与 sphere 图都必须 Clamp：它们是查找表/环境球，不是可平铺纹理。
+@group(1) @binding(5) var ramp_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -78,7 +80,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     } else if (toon_code == 3u) {
         toon_uv = vec2<f32>(1.0 - shade, 0.5);
     }
-    let toon = textureSample(toon_texture, diffuse_sampler, toon_uv).rgb;
+    // toon 图是明暗查找表：亮部是白色（×1 保持原色），暗部是影色（直接乘上去），
+    // 色阶数量决定阴影是硬卡通还是渐变。用 Clamp 采样，避免两端颜色互相串。
+    let toon = textureSample(toon_texture, ramp_sampler, toon_uv).rgb;
     let texel = textureSample(diffuse_texture, diffuse_sampler, input.uv);
     let alpha = material.diffuse.a * texel.a;
     if (alpha < material.params.w) {
@@ -86,7 +90,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // MMD 材质：ambient 是"暗部地板"，而不是和 toon 一起叠乘的增益。
-    // 旧写法 base*(ambient+toon) 会把 ambient=0.5 的材质亮面推到 1.5× 过曝。
     let ambient = clamp(material.ambient.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     let base = input.color * material.diffuse.rgb * texel.rgb;
     var color = base * (ambient + toon * (vec3<f32>(1.0) - ambient));
@@ -108,7 +111,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let reflection = reflect(vec3<f32>(0.0, 0.0, -1.0), normal_view);
         // 视图空间 +Y 向上，而 sphere 图的 v=0 在顶部，所以 y 取反。
         let sphere_uv = vec2<f32>(reflection.x * 0.5 + 0.5, 0.5 - reflection.y * 0.5);
-        let sphere = textureSample(sphere_texture, diffuse_sampler, sphere_uv).rgb;
+        let sphere = textureSample(sphere_texture, ramp_sampler, sphere_uv).rgb;
         if (sphere_mode == 1u) {
             color = color * sphere;
         } else {

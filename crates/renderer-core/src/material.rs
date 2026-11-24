@@ -59,6 +59,7 @@ pub(crate) fn create_material_state(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
+    ramp_sampler: &wgpu::Sampler,
     texture_slots: &[TextureSlot],
     toon_slots: &[TextureSlot],
     fallback_view: &wgpu::TextureView,
@@ -167,6 +168,10 @@ pub(crate) fn create_material_state(
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(&sphere_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(ramp_sampler),
                     },
                 ],
             })

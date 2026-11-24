@@ -221,6 +221,19 @@ impl Renderer {
             ..Default::default()
         });
 
+        // toon 图是明暗查找表，不是可平铺纹理：必须 Clamp，
+        // 否则采样到 v = 1.0 附近会回卷到另一端，亮端白色串进暗部。
+        let ramp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("toon ramp sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("material bind group layout"),
             entries: &[
@@ -270,6 +283,12 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -290,6 +309,7 @@ impl Renderer {
             &device,
             &material_layout,
             &sampler,
+            &ramp_sampler,
             &texture_slots,
             &toon_slots,
             &fallback_view,
