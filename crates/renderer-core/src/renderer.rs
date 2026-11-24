@@ -1,19 +1,23 @@
 use std::{borrow::Cow, path::Path, time::Instant};
 
 use anyhow::{anyhow, Context, Result};
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::{
     animation::VmdClip,
     backend::BACKEND_LABEL,
     camera::OrbitCamera,
+    material::create_material_state,
     model::{
         texture::{self, TextureSlot},
         Bone, Mesh,
     },
     overlay::FpsOverlay,
-    renderer_helpers::{create_depth_texture, depth_state, draw_material_groups, vertex_layout},
+    renderer_helpers::{
+        create_depth_texture, depth_state, depth_state_with, draw_opaque_groups,
+        draw_transparent_groups_ordered, group_centers, transparent_order, vertex_layout,
+    },
     skinning::{compute_bone_matrices, Pose},
 };
 
@@ -25,14 +29,6 @@ const OUTLINE_SOURCE: &str = include_str!("shaders/outline.wgsl");
 struct Uniforms {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct MaterialUniform {
-    diffuse: [f32; 4],
-    edge_color: [f32; 4],
-    params: [f32; 4],
 }
 
 fn matrices_to_floats(matrices: &[Mat4]) -> Vec<f32> {
@@ -51,6 +47,7 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    transparent_pipeline: wgpu::RenderPipeline,
     outline_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
@@ -58,6 +55,7 @@ pub struct Renderer {
     bones: Vec<Bone>,
     animation: Option<VmdClip>,
     material_bind_groups: Vec<wgpu::BindGroup>,
+    material_transparent: Vec<bool>,
     texture_slots: Vec<TextureSlot>,
     toon_slots: Vec<TextureSlot>,
     // 由 material bind group 持有，但 Rust 侧无需再次读取
@@ -70,6 +68,7 @@ pub struct Renderer {
     fps_overlay: Option<FpsOverlay>,
     camera: OrbitCamera,
     groups: Vec<crate::model::MaterialGroup>,
+    group_centers: Vec<Vec3>,
     index_count: u32,
     model_name: String,
     start: Instant,
@@ -290,71 +289,23 @@ impl Renderer {
             label: "white-fallback".into(),
             texture: fallback_texture,
             view: fallback_view.clone(),
+            alpha_max: 255,
         });
         let toon_slots = texture::internal_toon_textures(&device, &queue);
 
-        let mut material_bind_groups = Vec::with_capacity(mesh.materials.len());
-        for material in &mesh.materials {
-            let uniform = MaterialUniform {
-                diffuse: material.diffuse,
-                edge_color: material.edge_color,
-                params: [material.edge_scale, material.sphere_mode as f32, 0.0, 0.0],
-            };
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("material uniform"),
-                contents: bytemuck::bytes_of(&uniform),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-            let view = material
-                .texture_index
-                .and_then(|index| texture_slots.get(index))
-                .map(|slot| slot.view.clone())
-                .unwrap_or_else(|| fallback_view.clone());
-            let toon_view = if material.toon_reference == 0 {
-                usize::try_from(material.toon_index)
-                    .ok()
-                    .and_then(|index| texture_slots.get(index))
-                    .or_else(|| toon_slots.first())
-            } else {
-                usize::try_from(material.toon_index)
-                    .ok()
-                    .and_then(|index| toon_slots.get(index))
-                    .or_else(|| toon_slots.first())
-            }
-            .map(|slot| slot.view.clone())
-            .unwrap_or_else(|| fallback_view.clone());
-            let sphere_view = material
-                .sphere_index
-                .and_then(|index| texture_slots.get(index))
-                .map(|slot| slot.view.clone())
-                .unwrap_or_else(|| fallback_view.clone());
-            material_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("material {}", material.name)),
-                layout: &material_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&toon_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&sphere_view),
-                    },
-                ],
-            }));
-        }
+        let material_state = create_material_state(
+            &device,
+            &material_layout,
+            &sampler,
+            &texture_slots,
+            &toon_slots,
+            &fallback_view,
+            &mesh.materials,
+        );
+        let material_bind_groups = material_state.bind_groups;
+        let material_transparent = material_state.transparent;
+
+        let group_centers = group_centers(&mesh.vertices, &mesh.indices, &mesh.groups);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh pipeline layout"),
@@ -383,6 +334,32 @@ impl Renderer {
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(depth_state(true)),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("transparent mesh pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(vertex_layout())],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(depth_state_with(false, wgpu::CompareFunction::LessEqual)),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -438,6 +415,7 @@ impl Renderer {
             surface,
             config,
             pipeline,
+            transparent_pipeline,
             outline_pipeline,
             bind_group,
             uniform_buffer,
@@ -445,6 +423,7 @@ impl Renderer {
             bones: mesh.bones,
             animation: None,
             material_bind_groups,
+            material_transparent,
             texture_slots,
             toon_slots,
             sampler,
@@ -459,6 +438,7 @@ impl Renderer {
                 camera
             },
             groups: mesh.groups,
+            group_centers,
             index_count: mesh.indices.len() as u32,
             model_name: mesh.name,
             start: Instant::now(),
@@ -515,6 +495,13 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+
+        let transparent_order = transparent_order(
+            &self.groups,
+            &self.group_centers,
+            &self.material_transparent,
+            self.camera.eye(),
+        );
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -578,13 +565,32 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            draw_material_groups(&mut pass, &self.groups, &self.material_bind_groups);
+            draw_opaque_groups(
+                &mut pass,
+                &self.groups,
+                &self.material_bind_groups,
+                &self.material_transparent,
+            );
 
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            draw_material_groups(&mut pass, &self.groups, &self.material_bind_groups);
+            draw_opaque_groups(
+                &mut pass,
+                &self.groups,
+                &self.material_bind_groups,
+                &self.material_transparent,
+            );
+
+            pass.set_pipeline(&self.transparent_pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            draw_transparent_groups_ordered(
+                &mut pass,
+                &self.groups,
+                &self.material_bind_groups,
+                &transparent_order,
+            );
 
             if let Some(overlay) = &self.fps_overlay {
                 if let Err(error) = overlay.render(&mut pass) {

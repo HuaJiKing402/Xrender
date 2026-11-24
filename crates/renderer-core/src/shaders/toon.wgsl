@@ -60,10 +60,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let ndl = clamp(dot(normal, light_direction), 0.0, 1.0);
     let toon = textureSample(toon_texture, diffuse_sampler, vec2<f32>(ndl, 0.5)).rgb;
     let texel = textureSample(diffuse_texture, diffuse_sampler, input.uv);
+    let alpha = material.diffuse.a * texel.a;
+    if (alpha < material.params.w) {
+        discard;
+    }
     var color = input.color * material.diffuse.rgb * texel.rgb * toon;
 
     let sphere_mode = u32(material.params.y);
-    if (sphere_mode == 1u || sphere_mode == 2u) {
+    let sphere_enabled = material.params.z > 0.5;
+    if (sphere_enabled && (sphere_mode == 1u || sphere_mode == 2u)) {
         let sphere_uv = vec2<f32>(normal.x * 0.5 + 0.5, normal.y * 0.5 + 0.5);
         let sphere = textureSample(sphere_texture, diffuse_sampler, sphere_uv).rgb;
         if (sphere_mode == 1u) {
@@ -72,5 +77,5 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             color = color + sphere;
         }
     }
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(color, alpha);
 }

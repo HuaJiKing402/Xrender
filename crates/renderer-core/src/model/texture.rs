@@ -8,6 +8,8 @@ pub struct TextureSlot {
     pub label: String,
     pub texture: Texture,
     pub view: TextureView,
+    /// 贴图 alpha 通道的最大值；用于区分“整体半透明”和“局部镂空”。
+    pub alpha_max: u8,
 }
 
 fn padded_rgba(width: u32, height: u32, rgba: &[u8]) -> (Vec<u8>, u32) {
@@ -102,6 +104,7 @@ pub fn internal_toon_textures(device: &Device, queue: &Queue) -> Vec<TextureSlot
                 label: format!("toon{:02}.bmp", index + 1),
                 texture,
                 view,
+                alpha_max: 255,
             }
         })
         .collect()
@@ -125,16 +128,20 @@ pub fn load_textures(
             base_dir.join(candidate)
         };
 
-        let texture = match image::open(&full_path) {
+        let (texture, alpha_max) = match image::open(&full_path) {
             Ok(image) => {
                 let rgba = image.to_rgba8();
-                create_texture_from_rgba(
-                    device,
-                    queue,
-                    &format!("pmx-texture-{index}"),
-                    rgba.width(),
-                    rgba.height(),
-                    rgba.as_raw(),
+                let alpha_max = rgba.pixels().map(|pixel| pixel[3]).max().unwrap_or(255);
+                (
+                    create_texture_from_rgba(
+                        device,
+                        queue,
+                        &format!("pmx-texture-{index}"),
+                        rgba.width(),
+                        rgba.height(),
+                        rgba.as_raw(),
+                    ),
+                    alpha_max,
                 )
             }
             Err(error) => {
@@ -143,7 +150,10 @@ pub fn load_textures(
                     full_path.display(),
                     error
                 );
-                white_texture(device, queue, &format!("pmx-texture-{index}-fallback"))
+                (
+                    white_texture(device, queue, &format!("pmx-texture-{index}-fallback")),
+                    255,
+                )
             }
         };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -151,6 +161,7 @@ pub fn load_textures(
             label: path.clone(),
             texture,
             view,
+            alpha_max,
         });
     }
     Ok(slots)

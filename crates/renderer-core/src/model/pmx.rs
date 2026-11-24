@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 
-use super::{color_from_normal, Bone, Material, MaterialGroup, Mesh, MeshVertex};
+use super::{Bone, Material, MaterialGroup, Mesh, MeshVertex};
 
 struct Reader<'a> {
     data: &'a [u8],
@@ -206,11 +206,7 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         vertices.push(MeshVertex {
             position,
             normal,
-            color: if normal == [0.0; 3] {
-                [0.75, 0.75, 0.8]
-            } else {
-                color_from_normal(normal)
-            },
+            color: [1.0, 1.0, 1.0],
             uv,
             bone_indices,
             bone_weights,
@@ -363,19 +359,6 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
             layer,
             flags,
         });
-    }
-
-    for group in &groups {
-        let material = &materials[group.material_index];
-        for index in &indices[group.index_start..group.index_start + group.index_count] {
-            if let Some(vertex) = vertices.get_mut(*index as usize) {
-                vertex.color = [
-                    material.diffuse[0],
-                    material.diffuse[1],
-                    material.diffuse[2],
-                ];
-            }
-        }
     }
 
     let mesh = Mesh {

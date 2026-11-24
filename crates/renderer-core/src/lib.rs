@@ -2,6 +2,7 @@ pub mod animation;
 pub mod backend;
 pub mod camera;
 mod fps;
+mod material;
 pub mod model;
 mod overlay;
 pub mod renderer;
