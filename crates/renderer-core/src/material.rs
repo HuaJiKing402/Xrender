@@ -32,12 +32,12 @@ fn is_transparent(material: &MaterialProfile, texture_slots: &[TextureSlot]) -> 
 
 /// 解析 toon 贴图：MMD 的 `toon_reference` 决定查外部贴图表还是内置 toon 表；
 /// 索引无效或缺失时回退到内置 toon01，避免整块材质失去明暗层次。
-fn resolve_toon_view(
+fn resolve_toon_slot<'a>(
     toon_reference: u8,
     toon_index: i32,
-    texture_slots: &[TextureSlot],
-    toon_slots: &[TextureSlot],
-) -> Option<wgpu::TextureView> {
+    texture_slots: &'a [TextureSlot],
+    toon_slots: &'a [TextureSlot],
+) -> Option<&'a TextureSlot> {
     let slots = if toon_reference == 0 {
         texture_slots
     } else {
@@ -47,7 +47,6 @@ fn resolve_toon_view(
         .ok()
         .and_then(|index| slots.get(index))
         .or_else(|| toon_slots.first())
-        .map(|slot| slot.view.clone())
 }
 
 pub(crate) fn create_material_state(
@@ -79,6 +78,7 @@ pub(crate) fn create_material_state(
                 .unwrap_or(([0.0, 0.0, 0.0, 1.0], 0.0));
             // 着色模型决定剩下的参数；默认值等价于"贴图 × diffuse"。
             let mut ambient = [0.0f32; 3];
+            let mut toon_code = 0.0f32;
             let mut specular = [0.0f32; 4];
             let mut sphere_mode = 0.0f32;
             let mut sphere_enabled = false;
@@ -95,13 +95,14 @@ pub(crate) fn create_material_state(
                         material.specular_strength,
                     ];
                     sphere_mode = f32::from(mmd.sphere_mode);
-                    if let Some(view) = resolve_toon_view(
+                    if let Some(slot) = resolve_toon_slot(
                         mmd.toon_reference,
                         mmd.toon_index,
                         texture_slots,
                         toon_slots,
                     ) {
-                        toon_view = view;
+                        toon_view = slot.view.clone();
+                        toon_code = slot.toon.code();
                     }
                     if let Some(view) = mmd
                         .sphere_index
@@ -122,7 +123,8 @@ pub(crate) fn create_material_state(
                     if sphere_enabled { 1.0 } else { 0.0 },
                     if blend { 0.01 } else { 0.5 },
                 ],
-                ambient: [ambient[0], ambient[1], ambient[2], 0.0],
+                // ambient.w 复用为 toon 采样编码，见 `ToonSampling::code`。
+                ambient: [ambient[0], ambient[1], ambient[2], toon_code],
                 specular,
             };
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

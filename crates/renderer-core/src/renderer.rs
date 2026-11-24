@@ -280,6 +280,7 @@ impl Renderer {
             texture: fallback_texture,
             view: fallback_view.clone(),
             alpha_max: 255,
+            toon: Default::default(),
         });
         let toon_slots = texture::load_toon_textures(&device, &queue, texture_base_dir);
 
