@@ -5,6 +5,7 @@ mod fps;
 mod material;
 pub mod model;
 mod overlay;
+mod pipeline;
 pub mod renderer;
 mod renderer_helpers;
 pub mod skinning;

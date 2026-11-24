@@ -1,4 +1,4 @@
-use std::{borrow::Cow, path::Path, time::Instant};
+use std::{path::Path, time::Instant};
 
 use anyhow::{anyhow, Context, Result};
 use glam::{Mat4, Vec3};
@@ -14,17 +14,13 @@ use crate::{
         Bone, Mesh,
     },
     overlay::FpsOverlay,
+    pipeline::{PipelineCache, ScenePipelineKeys},
     renderer_helpers::{
-        create_depth_texture, depth_state, depth_state_with, draw_opaque_groups,
-        draw_outline_groups, draw_transparent_groups_ordered, group_centers, transparent_order,
-        vertex_layout,
+        create_depth_texture, draw_opaque_groups, draw_outline_groups,
+        draw_transparent_groups_ordered, group_centers, transparent_order,
     },
     skinning::{compute_bone_matrices, Pose},
 };
-
-const SHADER_SOURCE: &str = include_str!("shaders/toon.wgsl");
-const OUTLINE_SOURCE: &str = include_str!("shaders/outline.wgsl");
-const DEPTH_SOURCE: &str = include_str!("shaders/depth.wgsl");
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -49,10 +45,8 @@ pub struct Renderer {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
-    transparent_pipeline: wgpu::RenderPipeline,
-    depth_pipeline: wgpu::RenderPipeline,
-    outline_pipeline: wgpu::RenderPipeline,
+    pipelines: PipelineCache,
+    pipeline_keys: ScenePipelineKeys,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
     bone_buffer: wgpu::Buffer,
@@ -156,19 +150,6 @@ impl Renderer {
             .ok_or_else(|| anyhow!("surface has no supported default configuration"))?;
         config.format = format;
         surface.configure(&device, &config);
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("toon.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
-        });
-        let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("outline.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(OUTLINE_SOURCE)),
-        });
-        let depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("depth.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(DEPTH_SOURCE)),
-        });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mesh uniforms"),
@@ -323,112 +304,8 @@ impl Renderer {
             ..Default::default()
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("mesh pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_layout())],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(depth_state_with(false, wgpu::CompareFunction::LessEqual)),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("depth prepass pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &depth_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_layout())],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &depth_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::empty(),
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(depth_state(true)),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("transparent mesh pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_layout())],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(depth_state_with(false, wgpu::CompareFunction::LessEqual)),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("outline pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &outline_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_layout())],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &outline_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Front),
-                ..Default::default()
-            },
-            depth_stencil: Some(depth_state_with(false, wgpu::CompareFunction::LessEqual)),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let mut pipelines = PipelineCache::new(&device);
+        let pipeline_keys = pipelines.ensure_scene(&device, &pipeline_layout, format);
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh vertices"),
@@ -450,10 +327,8 @@ impl Renderer {
             queue,
             surface,
             config,
-            pipeline,
-            transparent_pipeline,
-            depth_pipeline,
-            outline_pipeline,
+            pipelines,
+            pipeline_keys,
             bind_group,
             uniform_buffer,
             bone_buffer,
@@ -601,7 +476,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.depth_pipeline);
+            pass.set_pipeline(self.pipelines.get(self.pipeline_keys.depth_prepass));
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -612,7 +487,7 @@ impl Renderer {
                 &self.material_transparent,
             );
 
-            pass.set_pipeline(&self.outline_pipeline);
+            pass.set_pipeline(self.pipelines.get(self.pipeline_keys.outline));
             pass.set_bind_group(0, &self.bind_group, &[]);
             draw_outline_groups(
                 &mut pass,
@@ -621,7 +496,7 @@ impl Renderer {
                 &self.material_outline,
             );
 
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(self.pipelines.get(self.pipeline_keys.opaque));
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -632,7 +507,7 @@ impl Renderer {
                 &self.material_transparent,
             );
 
-            pass.set_pipeline(&self.transparent_pipeline);
+            pass.set_pipeline(self.pipelines.get(self.pipeline_keys.transparent));
             pass.set_bind_group(0, &self.bind_group, &[]);
             draw_transparent_groups_ordered(
                 &mut pass,
