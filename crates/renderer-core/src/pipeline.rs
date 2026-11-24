@@ -96,55 +96,8 @@ impl PipelineCache {
         }
     }
 
-    /// 构建场景真正使用的四条管线，返回它们的 key。
-    pub fn ensure_scene(
-        &mut self,
-        device: &wgpu::Device,
-        layout: &PipelineLayout,
-        format: TextureFormat,
-    ) -> ScenePipelineKeys {
-        let keys = ScenePipelineKeys {
-            depth_prepass: PipelineKey {
-                shading: ShadingModel::Depth,
-                blend: BlendMode::Opaque,
-                depth: DepthMode::WriteLess,
-                cull: CullMode::None,
-                color_write: false,
-            },
-            outline: PipelineKey {
-                shading: ShadingModel::Outline,
-                blend: BlendMode::Opaque,
-                depth: DepthMode::TestLessEqual,
-                cull: CullMode::Front,
-                color_write: true,
-            },
-            opaque: PipelineKey {
-                shading: ShadingModel::Toon,
-                blend: BlendMode::Opaque,
-                depth: DepthMode::TestLessEqual,
-                cull: CullMode::None,
-                color_write: true,
-            },
-            transparent: PipelineKey {
-                shading: ShadingModel::Toon,
-                blend: BlendMode::AlphaBlend,
-                depth: DepthMode::TestLessEqual,
-                cull: CullMode::None,
-                color_write: true,
-            },
-        };
-        for key in [
-            keys.depth_prepass,
-            keys.outline,
-            keys.opaque,
-            keys.transparent,
-        ] {
-            self.ensure(device, layout, format, key);
-        }
-        keys
-    }
-
     /// 保证某个 key 对应的管线存在，返回同一个 key 便于取用。
+    /// 具体要哪些管线由 `pass::ScenePasses` 决定。
     pub fn ensure(
         &mut self,
         device: &wgpu::Device,
@@ -225,13 +178,4 @@ impl PipelineCache {
             cache: None,
         })
     }
-}
-
-/// 场景固定使用的四条管线的 key。
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ScenePipelineKeys {
-    pub depth_prepass: PipelineKey,
-    pub outline: PipelineKey,
-    pub opaque: PipelineKey,
-    pub transparent: PipelineKey,
 }

@@ -14,7 +14,8 @@ use crate::{
         Bone, Mesh,
     },
     overlay::FpsOverlay,
-    pipeline::{PipelineCache, ScenePipelineKeys},
+    pass::{PassDraw, ScenePasses},
+    pipeline::PipelineCache,
     renderer_helpers::{
         blit_bind_group_layout, create_blit_pipeline, create_depth_texture, create_scene_color,
         draw_opaque_groups, draw_outline_groups, draw_transparent_groups_ordered, group_centers,
@@ -49,7 +50,8 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     pipelines: PipelineCache,
-    pipeline_keys: ScenePipelineKeys,
+    /// 本帧的 pass 计划：顺序与每步的管线、绘制范围都在这里。
+    scene_passes: ScenePasses,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
     bone_buffer: wgpu::Buffer,
@@ -336,7 +338,14 @@ impl Renderer {
         });
 
         let mut pipelines = PipelineCache::new(&device);
-        let pipeline_keys = pipelines.ensure_scene(&device, &pipeline_layout, format);
+        let has_outline = material_outline.iter().any(|enabled| *enabled);
+        let scene_passes = ScenePasses::build(
+            &mut pipelines,
+            &device,
+            &pipeline_layout,
+            format,
+            has_outline,
+        );
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh vertices"),
@@ -389,7 +398,7 @@ impl Renderer {
             surface,
             config,
             pipelines,
-            pipeline_keys,
+            scene_passes,
             bind_group,
             uniform_buffer,
             bone_buffer,
@@ -564,46 +573,34 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(self.pipelines.get(self.pipeline_keys.depth_prepass));
-            pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            draw_opaque_groups(
-                &mut pass,
-                &self.groups,
-                &self.material_bind_groups,
-                &self.material_transparent,
-            );
-
-            pass.set_pipeline(self.pipelines.get(self.pipeline_keys.outline));
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            draw_outline_groups(
-                &mut pass,
-                &self.groups,
-                &self.material_bind_groups,
-                &self.material_outline,
-                &self.material_transparent,
-            );
-
-            pass.set_pipeline(self.pipelines.get(self.pipeline_keys.opaque));
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            draw_opaque_groups(
-                &mut pass,
-                &self.groups,
-                &self.material_bind_groups,
-                &self.material_transparent,
-            );
-
-            pass.set_pipeline(self.pipelines.get(self.pipeline_keys.transparent));
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            draw_transparent_groups_ordered(
-                &mut pass,
-                &self.groups,
-                &self.material_bind_groups,
-                &transparent_order,
-            );
+            for scene_pass in self.scene_passes.iter() {
+                log::trace!("scene pass: {}", scene_pass.label);
+                pass.set_pipeline(self.pipelines.get(scene_pass.pipeline));
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                match scene_pass.draw {
+                    PassDraw::OpaqueGroups => draw_opaque_groups(
+                        &mut pass,
+                        &self.groups,
+                        &self.material_bind_groups,
+                        &self.material_transparent,
+                    ),
+                    PassDraw::OutlineGroups => draw_outline_groups(
+                        &mut pass,
+                        &self.groups,
+                        &self.material_bind_groups,
+                        &self.material_outline,
+                        &self.material_transparent,
+                    ),
+                    PassDraw::TransparentGroupsOrdered => draw_transparent_groups_ordered(
+                        &mut pass,
+                        &self.groups,
+                        &self.material_bind_groups,
+                        &transparent_order,
+                    ),
+                }
+            }
 
             if let Some(overlay) = &self.fps_overlay {
                 if let Err(error) = overlay.render(&mut pass) {

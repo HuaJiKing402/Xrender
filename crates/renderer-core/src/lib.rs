@@ -6,6 +6,7 @@ mod material;
 pub mod mmd;
 pub mod model;
 mod overlay;
+mod pass;
 mod pipeline;
 pub mod renderer;
 mod renderer_helpers;
