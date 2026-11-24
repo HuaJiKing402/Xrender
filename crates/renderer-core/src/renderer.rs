@@ -23,6 +23,7 @@ use crate::{
 
 const SHADER_SOURCE: &str = include_str!("shaders/toon.wgsl");
 const OUTLINE_SOURCE: &str = include_str!("shaders/outline.wgsl");
+const DEPTH_SOURCE: &str = include_str!("shaders/depth.wgsl");
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -48,6 +49,7 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     transparent_pipeline: wgpu::RenderPipeline,
+    depth_pipeline: wgpu::RenderPipeline,
     outline_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
@@ -159,6 +161,10 @@ impl Renderer {
         let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("outline.wgsl"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(OUTLINE_SOURCE)),
+        });
+        let depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("depth.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(DEPTH_SOURCE)),
         });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -333,6 +339,32 @@ impl Renderer {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(depth_state_with(false, wgpu::CompareFunction::LessEqual)),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("depth prepass pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &depth_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(vertex_layout())],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &depth_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::empty(),
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(depth_state(true)),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -388,7 +420,7 @@ impl Renderer {
                 cull_mode: Some(wgpu::Face::Front),
                 ..Default::default()
             },
-            depth_stencil: Some(depth_state(true)),
+            depth_stencil: Some(depth_state_with(false, wgpu::CompareFunction::LessEqual)),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -416,6 +448,7 @@ impl Renderer {
             config,
             pipeline,
             transparent_pipeline,
+            depth_pipeline,
             outline_pipeline,
             bind_group,
             uniform_buffer,
@@ -561,10 +594,19 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.outline_pipeline);
+            pass.set_pipeline(&self.depth_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            draw_opaque_groups(
+                &mut pass,
+                &self.groups,
+                &self.material_bind_groups,
+                &self.material_transparent,
+            );
+
+            pass.set_pipeline(&self.outline_pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
             draw_opaque_groups(
                 &mut pass,
                 &self.groups,
