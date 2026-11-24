@@ -19,6 +19,12 @@ pub(crate) struct MaterialState {
     pub outline: Vec<bool>,
 }
 
+/// 描边壳的膨胀量占模型尺寸的比例。
+///
+/// 模型在装载时已被归一化到单位尺寸，所以这里用固定比例即可；
+/// 具体宽度 = 该比例 × 材质的 edge_scale，由 CPU 算好再传给 shader。
+const OUTLINE_WIDTH_RATIO: f32 = 0.012;
+
 /// 材质整体半透明（或 alpha 通道整体偏低）时才使用 blend；
 /// 普通局部镂空走 alpha cutoff，避免大材质失去深度写入。
 fn is_transparent(material: &MaterialProfile, texture_slots: &[TextureSlot]) -> bool {
@@ -74,7 +80,7 @@ pub(crate) fn create_material_state(
             let (edge_color, edge_scale) = material
                 .outline
                 .as_ref()
-                .map(|outline| (outline.color, outline.scale))
+                .map(|outline| (outline.color, outline.scale * OUTLINE_WIDTH_RATIO))
                 .unwrap_or(([0.0, 0.0, 0.0, 1.0], 0.0));
             // 着色模型决定剩下的参数；默认值等价于"贴图 × diffuse"。
             let mut ambient = [0.0f32; 3];

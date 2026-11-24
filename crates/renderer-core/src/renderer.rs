@@ -499,6 +499,7 @@ impl Renderer {
                 &self.groups,
                 &self.material_bind_groups,
                 &self.material_outline,
+                &self.material_transparent,
             );
 
             pass.set_pipeline(self.pipelines.get(self.pipeline_keys.opaque));

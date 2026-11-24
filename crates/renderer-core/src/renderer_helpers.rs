@@ -106,18 +106,28 @@ pub(crate) fn draw_opaque_groups<'a>(
     }
 }
 
-/// 只绘制启用了描边的材质分组。
+/// 只绘制启用了描边、且整体不透明的材质分组。
+///
+/// 半透明材质如果也画描边，会在本体后面多出一层实色壳，看起来像脏边。
 pub(crate) fn draw_outline_groups<'a>(
     pass: &mut RenderPass<'a>,
     groups: &'a [MaterialGroup],
     bind_groups: &'a [BindGroup],
     material_outline: &[bool],
+    material_transparent: &[bool],
 ) {
     for group in groups {
         if group.index_count == 0 {
             continue;
         }
         if !material_outline
+            .get(group.material_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if material_transparent
             .get(group.material_index)
             .copied()
             .unwrap_or(false)
