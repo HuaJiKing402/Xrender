@@ -18,7 +18,7 @@ edition = "2021"
 rust-version = "1.89"
 
 [workspace.dependencies]
-wgpu = "=30.0.2"
+wgpu = { version = "=30.0.2", default-features = false, features = ["std", "parking_lot", "wgsl"] }
 winit = "=0.30.13"
 anyhow = "1"
 log = "0.4"

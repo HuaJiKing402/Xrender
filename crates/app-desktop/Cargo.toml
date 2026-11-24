@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-renderer-core = { path = "../renderer-core" }
+renderer-core = { path = "../renderer-core", default-features = false, features = ["backend-vulkan"] }
 winit.workspace = true
 anyhow.workspace = true
 log.workspace = true

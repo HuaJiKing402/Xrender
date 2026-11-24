@@ -8,7 +8,7 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-renderer-core = { path = "../renderer-core" }
+renderer-core = { path = "../renderer-core", default-features = false, features = ["backend-webgpu"] }
 wgpu.workspace = true
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"

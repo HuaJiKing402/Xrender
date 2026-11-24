@@ -15,5 +15,12 @@ image.workspace = true
 encoding_rs.workspace = true
 glyphon.workspace = true
 
+[features]
+default = ["backend-vulkan"]
+backend-vulkan = ["wgpu/vulkan"]
+backend-metal = ["wgpu/metal"]
+backend-webgpu = ["wgpu/webgpu"]
+backend-gles = ["wgpu/gles"]
+
 [dev-dependencies]
 pollster.workspace = true
