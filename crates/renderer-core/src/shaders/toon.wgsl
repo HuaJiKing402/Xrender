@@ -1,6 +1,7 @@
 struct Uniforms {
     mvp: mat4x4<f32>,
     model: mat4x4<f32>,
+    camera_position: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -10,6 +11,8 @@ struct MaterialParams {
     diffuse: vec4<f32>,
     edge_color: vec4<f32>,
     params: vec4<f32>,
+    ambient: vec4<f32>,
+    specular: vec4<f32>,
 };
 
 @group(1) @binding(0) var<uniform> material: MaterialParams;
@@ -32,6 +35,7 @@ struct VertexOutput {
     @location(0) normal: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) world_position: vec3<f32>,
 };
 
 @vertex
@@ -50,6 +54,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.normal = normalize((uniforms.model * vec4<f32>(skin_normal, 0.0)).xyz);
     output.color = input.color;
     output.uv = input.uv;
+    output.world_position = (uniforms.model * skinned).xyz;
     return output;
 }
 
@@ -57,6 +62,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(input.normal);
     let light_direction = normalize(vec3<f32>(0.4, 0.8, 1.0));
+    let view_direction = normalize(uniforms.camera_position.xyz - input.world_position);
     let ndl = clamp(dot(normal, light_direction), 0.0, 1.0);
     let toon = textureSample(toon_texture, diffuse_sampler, vec2<f32>(ndl, 0.5)).rgb;
     let texel = textureSample(diffuse_texture, diffuse_sampler, input.uv);
@@ -64,12 +70,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (alpha < material.params.w) {
         discard;
     }
-    var color = input.color * material.diffuse.rgb * texel.rgb * toon;
+
+    // MMD 材质：toon 作为明暗，ambient 作为环境补光，specular 用 Blinn-Phong。
+    var color = input.color * material.diffuse.rgb * texel.rgb * (material.ambient.rgb + toon);
+    let half_direction = normalize(light_direction + view_direction);
+    let specular = pow(max(dot(normal, half_direction), 0.0), 16.0) * material.specular.w;
+    color += material.specular.rgb * specular;
 
     let sphere_mode = u32(material.params.y);
     let sphere_enabled = material.params.z > 0.5;
     if (sphere_enabled && (sphere_mode == 1u || sphere_mode == 2u)) {
-        let sphere_uv = vec2<f32>(normal.x * 0.5 + 0.5, normal.y * 0.5 + 0.5);
+        // sphere map 使用反射向量，而不是直接拿法线当 UV。
+        let reflection = reflect(-view_direction, normal);
+        let sphere_uv = vec2<f32>(reflection.x * 0.5 + 0.5, reflection.y * 0.5 + 0.5);
         let sphere = textureSample(sphere_texture, diffuse_sampler, sphere_uv).rgb;
         if (sphere_mode == 1u) {
             color = color * sphere;

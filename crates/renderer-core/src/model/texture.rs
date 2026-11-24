@@ -77,35 +77,73 @@ pub fn white_texture(device: &Device, queue: &Queue, label: &str) -> Texture {
     create_texture_from_rgba(device, queue, label, 1, 1, &[255, 255, 255, 255])
 }
 
-/// 生成 MMD 内部 toon01-toon10 的简化渐变纹理。
+fn generated_toon_slot(device: &Device, queue: &Queue, index: usize) -> TextureSlot {
+    let width = 16u32;
+    let steps = 3 + index % 3;
+    let mut rgba = Vec::with_capacity((width * 4) as usize);
+    for x in 0..width {
+        let value = ((x as f32 / (width - 1) as f32 * steps as f32).floor() / (steps - 1) as f32
+            * 255.0)
+            .clamp(0.0, 255.0) as u8;
+        rgba.extend_from_slice(&[value, value, value, 255]);
+    }
+    let texture = create_texture_from_rgba(
+        device,
+        queue,
+        &format!("internal-toon-{}", index + 1),
+        width,
+        1,
+        &rgba,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    TextureSlot {
+        label: format!("toon{:02}.bmp", index + 1),
+        texture,
+        view,
+        alpha_max: 255,
+    }
+}
+
+/// 生成 MMD 内部 toon01-toon10 的回退渐变纹理。
 pub fn internal_toon_textures(device: &Device, queue: &Queue) -> Vec<TextureSlot> {
     (0..10)
+        .map(|index| generated_toon_slot(device, queue, index))
+        .collect()
+}
+
+/// 优先加载模型目录中的 toon01-toon10 资源，缺失时回退到内部渐变。
+pub fn load_toon_textures(device: &Device, queue: &Queue, base_dir: &Path) -> Vec<TextureSlot> {
+    (0..10)
         .map(|index| {
-            let width = 16u32;
-            let steps = 3 + index % 3;
-            let mut rgba = Vec::with_capacity((width * 4) as usize);
-            for x in 0..width {
-                let value = ((x as f32 / (width - 1) as f32 * steps as f32).floor()
-                    / (steps - 1) as f32
-                    * 255.0)
-                    .clamp(0.0, 255.0) as u8;
-                rgba.extend_from_slice(&[value, value, value, 255]);
+            for extension in ["bmp", "png", "tga", "jpg"] {
+                for name in [
+                    format!("toon{:02}.{}", index + 1, extension),
+                    format!("toon{}.{}", index + 1, extension),
+                ] {
+                    let path = base_dir.join(name);
+                    let Ok(image) = image::open(&path) else {
+                        continue;
+                    };
+                    let rgba = image.to_rgba8();
+                    let alpha_max = rgba.pixels().map(|pixel| pixel[3]).max().unwrap_or(255);
+                    let texture = create_texture_from_rgba(
+                        device,
+                        queue,
+                        &format!("toon-texture-{}", index + 1),
+                        rgba.width(),
+                        rgba.height(),
+                        rgba.as_raw(),
+                    );
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    return TextureSlot {
+                        label: format!("toon{:02}", index + 1),
+                        texture,
+                        view,
+                        alpha_max,
+                    };
+                }
             }
-            let texture = create_texture_from_rgba(
-                device,
-                queue,
-                &format!("internal-toon-{}", index + 1),
-                width,
-                1,
-                &rgba,
-            );
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            TextureSlot {
-                label: format!("toon{:02}.bmp", index + 1),
-                texture,
-                view,
-                alpha_max: 255,
-            }
+            generated_toon_slot(device, queue, index)
         })
         .collect()
 }

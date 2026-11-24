@@ -16,7 +16,8 @@ use crate::{
     overlay::FpsOverlay,
     renderer_helpers::{
         create_depth_texture, depth_state, depth_state_with, draw_opaque_groups,
-        draw_transparent_groups_ordered, group_centers, transparent_order, vertex_layout,
+        draw_outline_groups, draw_transparent_groups_ordered, group_centers, transparent_order,
+        vertex_layout,
     },
     skinning::{compute_bone_matrices, Pose},
 };
@@ -30,6 +31,7 @@ const DEPTH_SOURCE: &str = include_str!("shaders/depth.wgsl");
 struct Uniforms {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
+    camera_position: [f32; 4],
 }
 
 fn matrices_to_floats(matrices: &[Mat4]) -> Vec<f32> {
@@ -58,6 +60,7 @@ pub struct Renderer {
     animation: Option<VmdClip>,
     material_bind_groups: Vec<wgpu::BindGroup>,
     material_transparent: Vec<bool>,
+    material_outline: Vec<bool>,
     texture_slots: Vec<TextureSlot>,
     toon_slots: Vec<TextureSlot>,
     // 由 material bind group 持有，但 Rust 侧无需再次读取
@@ -297,7 +300,7 @@ impl Renderer {
             view: fallback_view.clone(),
             alpha_max: 255,
         });
-        let toon_slots = texture::internal_toon_textures(&device, &queue);
+        let toon_slots = texture::load_toon_textures(&device, &queue, texture_base_dir);
 
         let material_state = create_material_state(
             &device,
@@ -310,6 +313,7 @@ impl Renderer {
         );
         let material_bind_groups = material_state.bind_groups;
         let material_transparent = material_state.transparent;
+        let material_outline = material_state.outline;
 
         let group_centers = group_centers(&mesh.vertices, &mesh.indices, &mesh.groups);
 
@@ -457,6 +461,7 @@ impl Renderer {
             animation: None,
             material_bind_groups,
             material_transparent,
+            material_outline,
             texture_slots,
             toon_slots,
             sampler,
@@ -522,9 +527,11 @@ impl Renderer {
         }
         let model = Mat4::IDENTITY;
         let mvp = self.camera.view_projection() * model;
+        let eye = self.camera.eye();
         let uniforms = Uniforms {
             mvp: mvp.to_cols_array_2d(),
             model: model.to_cols_array_2d(),
+            camera_position: [eye.x, eye.y, eye.z, 1.0],
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -607,11 +614,11 @@ impl Renderer {
 
             pass.set_pipeline(&self.outline_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            draw_opaque_groups(
+            draw_outline_groups(
                 &mut pass,
                 &self.groups,
                 &self.material_bind_groups,
-                &self.material_transparent,
+                &self.material_outline,
             );
 
             pass.set_pipeline(&self.pipeline);

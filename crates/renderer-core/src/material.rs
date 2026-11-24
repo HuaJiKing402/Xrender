@@ -8,12 +8,15 @@ pub(crate) struct MaterialUniform {
     pub diffuse: [f32; 4],
     pub edge_color: [f32; 4],
     pub params: [f32; 4],
+    pub ambient: [f32; 4],
+    pub specular: [f32; 4],
 }
 
-/// 每个材质的 GPU 绑定与透明分类结果。
+/// 每个材质的 GPU 绑定与透明/描边分类结果。
 pub(crate) struct MaterialState {
     pub bind_groups: Vec<wgpu::BindGroup>,
     pub transparent: Vec<bool>,
+    pub outline: Vec<bool>,
 }
 
 /// 材质整体半透明（或 alpha 通道整体偏低）时才使用 blend；
@@ -40,6 +43,10 @@ pub(crate) fn create_material_state(
         .iter()
         .map(|material| is_transparent(material, texture_slots))
         .collect();
+    let outline: Vec<bool> = materials
+        .iter()
+        .map(|material| material.flags & 0x10 != 0)
+        .collect();
     let bind_groups = materials
         .iter()
         .enumerate()
@@ -58,6 +65,18 @@ pub(crate) fn create_material_state(
                     material.sphere_mode as f32,
                     if sphere_enabled { 1.0 } else { 0.0 },
                     if blend { 0.01 } else { 0.5 },
+                ],
+                ambient: [
+                    material.ambient[0],
+                    material.ambient[1],
+                    material.ambient[2],
+                    0.0,
+                ],
+                specular: [
+                    material.specular[0],
+                    material.specular[1],
+                    material.specular[2],
+                    material.specular_strength,
                 ],
             };
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -115,5 +134,6 @@ pub(crate) fn create_material_state(
     MaterialState {
         bind_groups,
         transparent,
+        outline,
     }
 }
