@@ -153,10 +153,11 @@ fn sample_track(track: &[BoneKeyframe], frame: f32) -> BoneKeyframe {
         let end = b.frame as f32;
         if frame >= start && frame <= end {
             let t = ((frame - start) / (end - start).max(f32::EPSILON)).clamp(0.0, 1.0);
-            let x = a.interpolation.x.ease(t);
-            let y = a.interpolation.y.ease(t);
-            let z = a.interpolation.z.ease(t);
-            let rotation_t = a.interpolation.rotation.ease(t);
+            // VMD 的插值曲线属于目的关键帧，即描述 a -> b 这一段。
+            let x = b.interpolation.x.ease(t);
+            let y = b.interpolation.y.ease(t);
+            let z = b.interpolation.z.ease(t);
+            let rotation_t = b.interpolation.rotation.ease(t);
             return BoneKeyframe {
                 frame: frame as u32,
                 position: Vec3::new(
@@ -165,7 +166,7 @@ fn sample_track(track: &[BoneKeyframe], frame: f32) -> BoneKeyframe {
                     a.position.z + (b.position.z - a.position.z) * z,
                 ),
                 rotation: Quat::slerp(a.rotation, b.rotation, rotation_t),
-                interpolation: a.interpolation,
+                interpolation: b.interpolation,
             };
         }
     }
@@ -190,5 +191,21 @@ mod tests {
         let ease_out = BezierCurve::new(0.0, 0.8, 0.0, 0.8);
         assert!(ease_in.ease(0.5) < 0.5);
         assert!(ease_out.ease(0.5) > 0.5);
+    }
+
+    #[test]
+    fn destination_keyframe_owns_the_segment_curve() {
+        let key = |frame, position| BoneKeyframe {
+            frame,
+            position,
+            rotation: Quat::IDENTITY,
+            interpolation: BoneInterpolation::default(),
+        };
+        let a = key(0, Vec3::ZERO);
+        let mut b = key(10, Vec3::new(10.0, 0.0, 0.0));
+        b.interpolation.x = BezierCurve::new(0.8, 0.0, 0.8, 0.0);
+
+        let sampled = sample_track(&[a, b], 5.0);
+        assert!(sampled.position.x < 5.0);
     }
 }
