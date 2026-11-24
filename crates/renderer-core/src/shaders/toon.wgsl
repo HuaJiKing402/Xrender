@@ -2,6 +2,7 @@ struct Uniforms {
     mvp: mat4x4<f32>,
     model: mat4x4<f32>,
     camera_position: vec4<f32>,
+    view_rotation: mat4x4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -101,9 +102,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let sphere_mode = u32(material.params.y);
     let sphere_enabled = material.params.z > 0.5;
     if (sphere_enabled && (sphere_mode == 1u || sphere_mode == 2u)) {
-        // sphere map 使用反射向量，而不是直接拿法线当 UV。
-        let reflection = reflect(-view_direction, normal);
-        let sphere_uv = vec2<f32>(reflection.x * 0.5 + 0.5, reflection.y * 0.5 + 0.5);
+        // MMD 的 sphere map 约定在相机空间：先把法线转到视图空间，
+        // 再用视线方向求反射。直接拿世界空间反射向量当 UV，模型一转取样区就跑偏。
+        let normal_view = normalize((uniforms.view_rotation * vec4<f32>(normal, 0.0)).xyz);
+        let reflection = reflect(vec3<f32>(0.0, 0.0, -1.0), normal_view);
+        // 视图空间 +Y 向上，而 sphere 图的 v=0 在顶部，所以 y 取反。
+        let sphere_uv = vec2<f32>(reflection.x * 0.5 + 0.5, 0.5 - reflection.y * 0.5);
         let sphere = textureSample(sphere_texture, diffuse_sampler, sphere_uv).rgb;
         if (sphere_mode == 1u) {
             color = color * sphere;

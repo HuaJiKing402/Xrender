@@ -1,7 +1,7 @@
 use std::{path::Path, time::Instant};
 
 use anyhow::{anyhow, Context, Result};
-use glam::{Mat4, Vec3};
+use glam::{Mat3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::{
@@ -28,6 +28,8 @@ struct Uniforms {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
     camera_position: [f32; 4],
+    /// 只有 toon.wgsl 读取（sphere map 需要在相机空间算反射）。
+    view_rotation: [[f32; 4]; 4],
 }
 
 fn matrices_to_floats(matrices: &[Mat4]) -> Vec<f32> {
@@ -404,10 +406,12 @@ impl Renderer {
         let model = Mat4::IDENTITY;
         let mvp = self.camera.view_projection() * model;
         let eye = self.camera.eye();
+        let view_rotation = Mat4::from_mat3(Mat3::from_mat4(self.camera.view()));
         let uniforms = Uniforms {
             mvp: mvp.to_cols_array_2d(),
             model: model.to_cols_array_2d(),
             camera_position: [eye.x, eye.y, eye.z, 1.0],
+            view_rotation: view_rotation.to_cols_array_2d(),
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
