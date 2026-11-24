@@ -20,10 +20,18 @@ fn identity_matrix() -> mat4x4<f32> {
 }
 
 fn bone_matrix(index: u32) -> mat4x4<f32> {
-    if (index == INVALID_BONE_INDEX) {
+    if (index == INVALID_BONE_INDEX || index >= arrayLength(&bone_matrices)) {
         return identity_matrix();
     }
     return bone_matrices[index];
+}
+
+fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
+    let len = length(v);
+    if (len < 1.0e-6) {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    return v / len;
 }
 
 struct MaterialParams {
@@ -75,7 +83,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
     var output: VertexOutput;
     output.clip_position = uniforms.mvp * skinned;
-    output.normal = normalize((uniforms.model * vec4<f32>(skin_normal, 0.0)).xyz);
+    output.normal = safe_normalize((uniforms.model * vec4<f32>(skin_normal, 0.0)).xyz);
     output.color = input.color;
     output.uv = input.uv;
     output.world_position = (uniforms.model * skinned).xyz;
@@ -84,7 +92,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let normal = normalize(input.normal);
+    let normal = safe_normalize(input.normal);
     let light_direction = normalize(vec3<f32>(0.4, 0.8, 1.0));
     let view_direction = normalize(uniforms.camera_position.xyz - input.world_position);
     // 半兰伯特：把 dot 从 [-1,1] 映射到 [0,1]，让掠射面仍落在线性渐变里，

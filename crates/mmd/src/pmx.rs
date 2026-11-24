@@ -384,6 +384,18 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         });
     }
 
+    // 顶点块在骨骼块之前解析，越界的正索引到这里才知道。
+    // 统一改成 INVALID_BONE_INDEX，shader 会把它当 identity 矩阵，
+    // 避免越界读取零矩阵后把法线退化成 NaN。
+    let bone_count_u32 = bones.len() as u32;
+    for vertex in &mut vertices {
+        for index in &mut vertex.bone_indices {
+            if *index != INVALID_BONE_INDEX && *index >= bone_count_u32 {
+                *index = INVALID_BONE_INDEX;
+            }
+        }
+    }
+
     let mesh = Mesh {
         name: model_name,
         vertices,

@@ -10,7 +10,7 @@
 //! - 没有描边时不需要 prepass，`opaque` pass 自己写深度（`Less`），
 //!   省掉一整遍全量顶点蒙皮。
 
-use wgpu::{TextureFormat, PipelineLayout};
+use wgpu::{PipelineLayout, TextureFormat};
 
 use crate::pipeline::{BlendMode, CullMode, DepthMode, PipelineCache, PipelineKey, ShadingModel};
 

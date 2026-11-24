@@ -362,8 +362,7 @@ impl Renderer {
 
         // 离屏颜色目标 + 搬运管线：渲染先落到自己的颜色纹理，再 blit 到 surface。
         let scene_color = create_scene_color(&device, size.0, size.1, format);
-        let scene_color_view =
-            scene_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene_color_view = scene_color.create_view(&wgpu::TextureViewDescriptor::default());
         let blit_layout = blit_bind_group_layout(&device);
         let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blit sampler"),

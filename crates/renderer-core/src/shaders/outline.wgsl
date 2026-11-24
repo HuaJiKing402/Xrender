@@ -18,10 +18,18 @@ fn identity_matrix() -> mat4x4<f32> {
 }
 
 fn bone_matrix(index: u32) -> mat4x4<f32> {
-    if (index == INVALID_BONE_INDEX) {
+    if (index == INVALID_BONE_INDEX || index >= arrayLength(&bone_matrices)) {
         return identity_matrix();
     }
     return bone_matrices[index];
+}
+
+fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
+    let len = length(v);
+    if (len < 1.0e-6) {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    return v / len;
 }
 
 struct MaterialParams {
@@ -53,7 +61,7 @@ fn vs_main(input: VertexInput) -> @builtin(position) vec4<f32> {
             + bone_matrix(input.bone_indices.w) * w.w;
     }
     let skinned = skin * vec4<f32>(input.position, 1.0);
-    let skin_normal = normalize(mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz) * input.normal);
+    let skin_normal = safe_normalize(mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz) * input.normal);
     // params.x 是 CPU 端算好的绝对膨胀量（edge_scale × 模型尺寸比例），
     // shader 不再乘写死的常数，方便以后按模型尺寸或视距调整。
     let expanded = skinned.xyz + skin_normal * material.params.x;

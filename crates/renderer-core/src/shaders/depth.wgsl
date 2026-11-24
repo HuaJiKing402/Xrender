@@ -18,7 +18,7 @@ fn identity_matrix() -> mat4x4<f32> {
 }
 
 fn bone_matrix(index: u32) -> mat4x4<f32> {
-    if (index == INVALID_BONE_INDEX) {
+    if (index == INVALID_BONE_INDEX || index >= arrayLength(&bone_matrices)) {
         return identity_matrix();
     }
     return bone_matrices[index];
