@@ -73,8 +73,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     // MMD 材质：toon 作为明暗，ambient 作为环境补光，specular 用 Blinn-Phong。
     var color = input.color * material.diffuse.rgb * texel.rgb * (material.ambient.rgb + toon);
+    // specular_strength 在 PMX 中作为高光指数；乘数固定。
     let half_direction = normalize(light_direction + view_direction);
-    let specular = pow(max(dot(normal, half_direction), 0.0), 16.0) * material.specular.w;
+    let specular_exponent = clamp(material.specular.w, 1.0, 100.0);
+    let specular = pow(max(dot(normal, half_direction), 0.0), specular_exponent);
     color += material.specular.rgb * specular;
 
     let sphere_mode = u32(material.params.y);
