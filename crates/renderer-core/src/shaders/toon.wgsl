@@ -63,17 +63,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(input.normal);
     let light_direction = normalize(vec3<f32>(0.4, 0.8, 1.0));
     let view_direction = normalize(uniforms.camera_position.xyz - input.world_position);
-    let ndl = clamp(dot(normal, light_direction), 0.0, 1.0);
+    // 半兰伯特：把 dot 从 [-1,1] 映射到 [0,1]，让掠射面仍落在线性渐变里，
+    // 而不是背光侧一律 clamp 到 0（那样整片背光会塌成同一个色阶）。
+    let shade = clamp(dot(normal, light_direction) * 0.5 + 0.5, 0.0, 1.0);
     // toon 图的渐变轴与亮端位置由 CPU 端检测后编码进 ambient.w，
     // 不能一律按 (shade, 0.5) 采样，否则纵向 toon 图会被压成一条线。
     let toon_code = u32(material.ambient.w + 0.5);
-    var toon_uv = vec2<f32>(ndl, 0.5);
+    var toon_uv = vec2<f32>(shade, 0.5);
     if (toon_code == 1u) {
-        toon_uv = vec2<f32>(0.5, ndl);
+        toon_uv = vec2<f32>(0.5, shade);
     } else if (toon_code == 2u) {
-        toon_uv = vec2<f32>(0.5, 1.0 - ndl);
+        toon_uv = vec2<f32>(0.5, 1.0 - shade);
     } else if (toon_code == 3u) {
-        toon_uv = vec2<f32>(1.0 - ndl, 0.5);
+        toon_uv = vec2<f32>(1.0 - shade, 0.5);
     }
     let toon = textureSample(toon_texture, diffuse_sampler, toon_uv).rgb;
     let texel = textureSample(diffuse_texture, diffuse_sampler, input.uv);
