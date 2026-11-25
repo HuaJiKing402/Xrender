@@ -50,6 +50,8 @@ struct App {
     model_path: Option<String>,
     vmd_path: Option<String>,
     max_frames: Option<u32>,
+    /// 设置 `CROSS_RENDER_CAPTURE` 时，最后一帧渲染完写一张 PNG 到该路径。
+    capture_path: Option<String>,
     frame_count: u32,
     last_frame: Option<Instant>,
     drag_button: Option<MouseButton>,
@@ -269,6 +271,15 @@ impl ApplicationHandler for App {
                 self.frame_count += 1;
                 if let Some(limit) = self.max_frames {
                     if self.frame_count >= limit {
+                        if let Some(path) = self.capture_path.clone() {
+                            match renderer.capture_png(Path::new(&path)) {
+                                Ok(()) => println!("captured {path}"),
+                                Err(error) => {
+                                    self.fail(event_loop, format!("capture failed: {error:#}"));
+                                    return;
+                                }
+                            }
+                        }
                         println!("rendered {} frames", self.frame_count);
                         event_loop.exit();
                     }
@@ -306,6 +317,7 @@ fn main() -> Result<()> {
         model_path: model_path_from_args_or_env(),
         vmd_path: vmd_path_from_args_or_env(),
         max_frames: max_frames_from_env(),
+        capture_path: env::var("CROSS_RENDER_CAPTURE").ok(),
         ..Default::default()
     };
     event_loop.run_app(&mut app)?;

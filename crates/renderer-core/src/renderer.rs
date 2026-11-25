@@ -851,6 +851,15 @@ impl Renderer {
         Ok(FrameImage::new(width, height, pixels))
     }
 
+    /// 渲染一帧到离屏目标并写成 PNG。
+    ///
+    /// 走的是无头路径，不依赖窗口；输出与窗口里看到的一致（1:1 blit）。
+    pub fn capture_png(&mut self, path: &Path) -> Result<()> {
+        self.render_offscreen()?;
+        let image = self.read_scene_rgba()?;
+        image.save_png(path)
+    }
+
     pub fn adapter_name(&self) -> &str {
         &self.adapter_name
     }

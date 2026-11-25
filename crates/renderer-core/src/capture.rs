@@ -3,6 +3,10 @@
 //! 渲染器的颜色目标在 GPU 上，回读之后以这份结构交给调用方：截图、像素断言、
 //! 画面回归测试都从它取数据，不必各自再处理纹理布局与行对齐。
 
+use std::path::Path;
+
+use anyhow::{Context, Result};
+
 /// 一帧的像素：行优先、紧密排布、每像素 4 字节 RGBA8。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameImage {
@@ -47,6 +51,24 @@ impl FrameImage {
         self.pixels
             .get(offset..offset + 4)
             .map(|slice| [slice[0], slice[1], slice[2], slice[3]])
+    }
+
+    /// 把这一帧写成 PNG。父目录不存在时自动创建。
+    pub fn save_png(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+        }
+        image::save_buffer(
+            path,
+            &self.pixels,
+            self.width,
+            self.height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .with_context(|| format!("failed to write {}", path.display()))
     }
 }
 
