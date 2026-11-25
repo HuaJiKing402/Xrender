@@ -23,7 +23,8 @@ MMD（PMX / VMD）是第一个完整接入的格式与着色模型；它的专�
 | 深度预通道 | ✅ | 仅在有描边的场景构建 |
 | 半透明 | ⚠️ | 仅按材质组质心从远到近排序 |
 | 离屏渲染 | ✅ | 场景画到 `scene_color`，再由全屏三角形 blit 到 surface |
-| MSAA / 后处理 / 阴影 | ❌ | 均未实现 |
+| MSAA | ⚠️ | 场景目标按格式特性取 4x→2x→单采样；深度附件跟不上就整体退回 1。后处理与阴影仍未实现 |
+| 后处理 / 阴影 | ❌ | 均未实现 |
 | 多模型 / 场景树 | ❌ | `Renderer` 只持一份网格 |
 | 无头渲染 | ✅ | `Renderer::new_headless` + `render_offscreen`，不需要窗口与交换链 |
 | 画面读回 / 截图 | ✅ | `read_scene_rgba` 返回 RGBA8，`capture_png` 直接落盘 |
@@ -166,7 +167,7 @@ pwsh -File scripts/check.ps1 -UpdateGolden  # 改了着色后重生成基线图
 
 | crate | 职责 | 关键文件 |
 |---|---|---|
-| `renderer-core` | 平台无关内核：设备、surface、管线、材质、pass、帧呈现 | `renderer.rs`、`pass.rs`、`pipeline.rs`、`material.rs`、`renderer_helpers.rs` |
+| `renderer-core` | 平台无关内核：设备、surface、管线、材质、pass、帧呈现 | `gpu.rs`、`renderer.rs`、`pass.rs`、`pipeline.rs`、`material.rs`、`renderer_helpers.rs` |
 | `mmd` | MMD 资源层：PMX / VMD 解析 | `pmx.rs`、`vmd.rs` |
 | `app-desktop` | `winit` 窗口、输入、帧循环 | `main.rs` |
 | `app-web` | wasm32 + canvas | `lib.rs` |
@@ -184,7 +185,7 @@ pwsh -File scripts/check.ps1 -UpdateGolden  # 改了着色后重生成基线图
 一帧的流程：
 
 1. **CPU 准备**：采样动画 → 计算骨骼矩阵（622 骨约 40 KB）→ 写全局 uniform（MVP / model / 相机位置 / 视图旋转矩阵）→ 透明分组从远到近排序。
-2. **场景 pass**（颜色目标是离屏 `scene_color`，与 surface 同格式）：
+2. **场景 pass**（颜色目标是离屏 `scene_color`，与 surface 同格式；开了 MSAA 时先画进多采样目标 `scene_msaa`，pass 结束后 resolve 到 `scene_color`）：
    - `depth-prepass`：只在场景存在描边材质时构建。写深度、不写颜色，`Less`。
    - `outline`：`cull Front`，只测不写深度。跳过半透明材质。
    - `opaque`：有 prepass 时只测不写；没有 prepass 时自己写深度（`Less`）。
@@ -220,6 +221,10 @@ pass 的顺序、管线 key 和绘制范围由 `pass::ScenePasses` 描述，`ren
 
 **Sphere map**：法线转到相机空间，对视线方向 `(0,0,-1)` 求反射，`uv = (r.x*0.5+0.5, 0.5-r.y*0.5)`。模式 1 乘算、模式 2 加算。
 
+**着色扩展槽**：`MaterialProfile.shading` 是 `ShadingData::Unlit` 或 `ShadingData::Toon(ToonParams)`。`ToonParams` 只说内核需要知道的事——用哪张 ramp（`RampSlot::Diffuse` 或 `Builtin`）、哪张环境球、乘算还是加算。PMX 的 `toon_reference`、索引 `-1`、内置表越界回落这些约定由 `mmd::pmx::toon_params` 翻译，内核代码里不再出现 MMD 的名字。
+
+**贴图表**：`TextureTable` 持有模型贴图、ramp 表与一张白色兜底，`ramp_slot` / `diffuse_slot` / `white_view` 是唯一入口；材质构造只收这一个参数。
+
 **描边**：沿蒙皮后的法线外扩出壳，宽度 = `0.012 × 材质 edge_scale`（CPU 侧算好绝对值），`cull Front` 只留背面壳，深度由 prepass 提供。
 
 ---
@@ -231,15 +236,14 @@ pass 的顺序、管线 key 和绘制范围由 `pass::ScenePasses` 描述，`ren
 3. 没有阴影：无 shadow map、无自阴影。
 4. 颜色空间规则不统一：贴图按 sRGB 解码，材质色与顶点色当线性值直接用。
 5. 贴图无 mipmap、无压缩格式；14 张 800×800 在 debug 下启动约 9 秒。
-6. 无 MSAA，描边锯齿明显。
+6. MSAA 只在场景目标上开（4x→2x→关，由颜色格式特性决定）；blit 到 surface 仍是单采样，不改变最终呈现的采样数。
 7. 单网格渲染，`model` 矩阵恒为单位阵；多模型需要重构。
 8. 每个材质一个 uniform buffer 与一个 bind group，材质数量上升后绑定开销线性增长。
 9. `cull Front` 对 PMX 双面薄片（`flags & 0x01`）无效，需要按材质分流管线。
-10. 内核仍持 `MmdMaterial`（`toon_reference` / `sphere_mode`），贴图表也有两套（`texture_slots` 与 `toon_slots`）。
-11. Web / Android / iOS 均未在本机验证。
-12. `Renderer` 是 20 字段、22 方法的大对象；文档（`docs/`）全部滞后于代码。
-13. GPU 计时在本机（RX 5700 XT / Vulkan）读回恒为 0，接口对外报「不可用」；换设备或驱动才能拿到真实数字。
-14. 黄金图基线是本机生成的，跨驱动的容差（平均差 3）刻意放宽，因此它对 1~2 级的颜色偏移不敏感。
+10. Web / Android / iOS 均未在本机验证。
+11. `Renderer` 仍是二十多个字段的大对象；`GpuContext` 与贴图表已经拆出去，多网格与资源句柄还没做。`docs/` 全部滞后于代码。
+12. GPU 计时在本机（RX 5700 XT / Vulkan）读回恒为 0，接口对外报「不可用」；换设备或驱动才能拿到真实数字。
+13. 黄金图基线是本机生成的，跨驱动的容差（平均差 3）刻意放宽，因此它对 1~2 级的颜色偏移不敏感。
 
 ---
 
@@ -248,7 +252,7 @@ pass 的顺序、管线 key 和绘制范围由 `pass::ScenePasses` 描述，`ren
 | 里程碑 | 版本 | 主题 | 核心交付 | 状态 |
 |---|---|---|---|---|
 | M0 | v0.8.0 | 可验证性 | 离屏读回、黄金图回归、`check` 脚本、GPU 计时 | **代码完成**（未打 tag） |
-| M1 | v0.9.0 | 内核与资源分层 | `GpuContext`、资源句柄、多网格、完成 MMD 剥离 | 未开始 |
+| M1 | v0.9.0 | 内核与资源分层 | `GpuContext`、资源句柄、多网格、完成 MMD 剥离 | 进行中：设备上下文、贴图表、`ShadingData::Toon`、骨骼精简已落地；多网格未开始 |
 | M2 | v0.10.0 | 帧图与渲染特性 | 渲染图、MSAA、tonemap + AA、颜色空间策略 | 未开始 |
 | M3 | v0.11.0 | 场景与光照 | 节点树、光源、阴影、剔除、材质变体 | 未开始 |
 | M4 | v0.12.0 | 资产与动画 | 异步加载、mipmap、压缩纹理、动画修正 | 未开始 |
