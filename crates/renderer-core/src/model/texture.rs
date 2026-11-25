@@ -171,22 +171,53 @@ pub fn white_texture(device: &Device, queue: &Queue, label: &str) -> Texture {
     create_texture_from_rgba(device, queue, label, 1, 1, &[255, 255, 255, 255])
 }
 
-fn generated_toon_slot(device: &Device, queue: &Queue, index: usize) -> TextureSlot {
-    let width = 16u32;
-    let steps = 3 + index % 3;
-    let mut rgba = Vec::with_capacity((width * 4) as usize);
-    for x in 0..width {
-        let value = ((x as f32 / (width - 1) as f32 * steps as f32).floor() / (steps - 1) as f32
-            * 255.0)
-            .clamp(0.0, 255.0) as u8;
-        rgba.extend_from_slice(&[value, value, value, 255]);
+/// MMD 官方内置 toon01-toon10（32×32、24 位 BMP，取自 MMD 安装目录）。
+///
+/// 打包进二进制，避免运行时依赖 MMD 安装路径：官方 toon 不随模型分发，
+/// 模型目录里通常找不到，之前正是因此回退到程序生成的假渐变。
+const BUILTIN_TOON: [&[u8]; 10] = [
+    include_bytes!("../../assets/toon/toon01.bmp"),
+    include_bytes!("../../assets/toon/toon02.bmp"),
+    include_bytes!("../../assets/toon/toon03.bmp"),
+    include_bytes!("../../assets/toon/toon04.bmp"),
+    include_bytes!("../../assets/toon/toon05.bmp"),
+    include_bytes!("../../assets/toon/toon06.bmp"),
+    include_bytes!("../../assets/toon/toon07.bmp"),
+    include_bytes!("../../assets/toon/toon08.bmp"),
+    include_bytes!("../../assets/toon/toon09.bmp"),
+    include_bytes!("../../assets/toon/toon10.bmp"),
+];
+
+/// 官方 toon 的采样排布：纵向渐变、白色在上半（图像 y=0），暗端在下半。
+///
+/// 固定为 `vertical + flip`（编码 2），不做内容检测——官方图的轴和朝向是确定的，
+/// 靠梯度猜反而会被 toon05/06 这类带横向变化的图带偏。
+fn builtin_toon_sampling() -> ToonSampling {
+    ToonSampling {
+        vertical: true,
+        flip: true,
     }
+}
+
+fn decode_builtin_toon(index: usize) -> Option<image::RgbaImage> {
+    let bytes = BUILTIN_TOON.get(index)?;
+    image::load_from_memory(bytes)
+        .ok()
+        .map(|image| image.to_rgba8())
+}
+
+fn builtin_toon_slot(device: &Device, queue: &Queue, index: usize) -> TextureSlot {
+    // 解码失败时退到官方 toon01 的影色，至少不会再把阴影压成纯黑。
+    let (width, height, rgba) = match decode_builtin_toon(index) {
+        Some(image) => (image.width(), image.height(), image.into_raw()),
+        None => (1, 1, vec![205u8, 205, 205, 255]),
+    };
     let texture = create_texture_from_rgba(
         device,
         queue,
-        &format!("internal-toon-{}", index + 1),
+        &format!("builtin-toon-{}", index + 1),
         width,
-        1,
+        height,
         &rgba,
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -195,23 +226,14 @@ fn generated_toon_slot(device: &Device, queue: &Queue, index: usize) -> TextureS
         texture,
         view,
         alpha_max: 255,
-        // 内部生成的渐变是横向、暗端在左，与历史采样 `(shade, 0.5)` 一致。
-        toon: ToonSampling::default(),
+        toon: builtin_toon_sampling(),
     }
 }
 
-/// 生成 MMD 内部 toon01-toon10 的回退渐变纹理。
-pub fn internal_toon_textures(device: &Device, queue: &Queue) -> Vec<TextureSlot> {
-    (0..10)
-        .map(|index| generated_toon_slot(device, queue, index))
-        .collect()
-}
-
-/// 优先加载模型目录中的 toon01-toon10 资源，缺失时回退到内部渐变。
-pub fn load_toon_textures(device: &Device, queue: &Queue, base_dir: &Path) -> Vec<TextureSlot> {
-    // 一次扫描目录，避免对每个候选名做 open 探测。
-    let mut candidates: HashMap<String, (u8, PathBuf)> = HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(base_dir) {
+/// 扫描单个目录，按文件名归类 toon 候选；同名的多种扩展名取 rank 最小者。
+fn scan_toon_dir(dir: &Path) -> HashMap<String, (u8, PathBuf)> {
+    let mut candidates = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             let Some(extension) = path
@@ -246,40 +268,66 @@ pub fn load_toon_textures(device: &Device, queue: &Queue, base_dir: &Path) -> Ve
                 .or_insert((rank, path));
         }
     }
+    candidates
+}
+
+/// toon 贴图的搜索目录，按优先级排列：
+/// 1. 环境变量 `MMD_TOON_DIR`（可直接指向 MMD 安装目录，最贴近原生）
+/// 2. 模型所在目录
+fn toon_search_dirs(base_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = std::env::var_os("MMD_TOON_DIR") {
+        if !dir.is_empty() {
+            dirs.push(PathBuf::from(dir));
+        }
+    }
+    dirs.push(base_dir.to_path_buf());
+    dirs
+}
+
+/// 加载 toon01-toon10：外部文件优先，全部缺失时回退到打包的官方原图。
+pub fn load_toon_textures(device: &Device, queue: &Queue, base_dir: &Path) -> Vec<TextureSlot> {
+    // 每个目录只扫一次，避免对每个候选名做 open 探测。
+    let scans: Vec<HashMap<String, (u8, PathBuf)>> = toon_search_dirs(base_dir)
+        .iter()
+        .map(|dir| scan_toon_dir(dir))
+        .collect();
 
     (0..10)
         .map(|index| {
-            for stem in [
-                format!("toon{:02}", index + 1),
-                format!("toon{}", index + 1),
-            ] {
-                let Some((_, path)) = candidates.get(&stem) else {
-                    continue;
-                };
-                let Ok(image) = image::open(path) else {
-                    continue;
-                };
-                let rgba = image.to_rgba8();
-                let alpha_max = rgba.pixels().map(|pixel| pixel[3]).max().unwrap_or(255);
-                let toon = detect_toon_sampling(rgba.width(), rgba.height(), rgba.as_raw());
-                let texture = create_texture_from_rgba(
-                    device,
-                    queue,
-                    &format!("toon-texture-{}", index + 1),
-                    rgba.width(),
-                    rgba.height(),
-                    rgba.as_raw(),
-                );
-                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                return TextureSlot {
-                    label: format!("toon{:02}", index + 1),
-                    texture,
-                    view,
-                    alpha_max,
-                    toon,
-                };
+            for candidates in &scans {
+                for stem in [
+                    format!("toon{:02}", index + 1),
+                    format!("toon{}", index + 1),
+                ] {
+                    let Some((_, path)) = candidates.get(&stem) else {
+                        continue;
+                    };
+                    let Ok(image) = image::open(path) else {
+                        continue;
+                    };
+                    let rgba = image.to_rgba8();
+                    let alpha_max = rgba.pixels().map(|pixel| pixel[3]).max().unwrap_or(255);
+                    let toon = detect_toon_sampling(rgba.width(), rgba.height(), rgba.as_raw());
+                    let texture = create_texture_from_rgba(
+                        device,
+                        queue,
+                        &format!("toon-texture-{}", index + 1),
+                        rgba.width(),
+                        rgba.height(),
+                        rgba.as_raw(),
+                    );
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    return TextureSlot {
+                        label: format!("toon{:02}", index + 1),
+                        texture,
+                        view,
+                        alpha_max,
+                        toon,
+                    };
+                }
             }
-            generated_toon_slot(device, queue, index)
+            builtin_toon_slot(device, queue, index)
         })
         .collect()
 }
@@ -378,7 +426,7 @@ mod tests {
 
     #[test]
     fn detects_horizontal_ramp_with_dark_head() {
-        // 对应内部生成的 toon 渐变：横向、暗端在左。
+        // 横向、暗端在左的图应判为横向不反向（code 0）。
         let sampling = detect_toon_sampling(16, 4, &ramp(16, 4, false, false));
         assert!(!sampling.vertical);
         assert!(!sampling.flip);
@@ -390,5 +438,37 @@ mod tests {
         let flat = vec![255u8; 8 * 8 * 4];
         let sampling = detect_toon_sampling(8, 8, &flat);
         assert_eq!(sampling, ToonSampling::default());
+    }
+
+    #[test]
+    fn builtin_toon_decodes_official_images() {
+        // 官方 toon01：32×32，影色 205 灰，顶部白色。
+        let toon01 = decode_builtin_toon(0).expect("toon01 should decode");
+        assert_eq!((toon01.width(), toon01.height()), (32, 32));
+        let shadow = toon01.get_pixel(0, 31);
+        assert_eq!([shadow[0], shadow[1], shadow[2]], [205, 205, 205]);
+        let lit = toon01.get_pixel(0, 0);
+        assert_eq!([lit[0], lit[1], lit[2]], [255, 255, 255]);
+
+        // 官方 toon02 的影色是暖调的浅粉灰，不能是纯灰。
+        let toon02 = decode_builtin_toon(1).expect("toon02 should decode");
+        let shadow = toon02.get_pixel(0, 31);
+        assert_eq!([shadow[0], shadow[1], shadow[2]], [245, 225, 225]);
+        assert!(shadow[0] > shadow[2], "toon02 shadow should be warm-tinted");
+
+        // 官方 toon07–10 几乎全白，等于无阴影。
+        for index in 6..10 {
+            let toon = decode_builtin_toon(index).expect("toon07..10 should decode");
+            let min = toon.pixels().map(|pixel| pixel[0]).min().unwrap_or(0);
+            assert_eq!(min, 255, "toon{:02} should be all white", index + 1);
+        }
+    }
+
+    #[test]
+    fn builtin_toon_uses_fixed_vertical_sampling() {
+        let sampling = builtin_toon_sampling();
+        assert!(sampling.vertical);
+        assert!(sampling.flip);
+        assert_eq!(sampling.code(), 2.0);
     }
 }
