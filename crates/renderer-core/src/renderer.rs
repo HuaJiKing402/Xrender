@@ -8,6 +8,7 @@ use crate::{
     animation::AnimationClip,
     backend::BACKEND_LABEL,
     camera::OrbitCamera,
+    capture::FrameImage,
     material::create_material_state,
     model::{
         texture::{self, TextureSlot},
@@ -757,6 +758,97 @@ impl Renderer {
 
     pub fn backend_label() -> &'static str {
         BACKEND_LABEL
+    }
+
+    /// 把离屏颜色目标读回 CPU，得到一帧 RGBA8 像素。
+    ///
+    /// 会阻塞等待 GPU 完成拷贝，只用于截图与测试，不要放进每帧循环。
+    pub fn read_scene_rgba(&self) -> Result<FrameImage> {
+        let width = self.target.width;
+        let height = self.target.height;
+        let unpadded_bytes_per_row = width * 4;
+        // copy_texture_to_buffer 要求每行按 256 字节对齐，而画面宽度通常不是 64 的倍数，
+        // 所以申请时按对齐后的行长算，读回后再把填充截掉。
+        let padded_bytes_per_row = unpadded_bytes_per_row
+            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene readback"),
+            size: (padded_bytes_per_row as u64) * (height as u64),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("scene readback encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.scene_color,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| anyhow!("waiting for the scene readback failed: {error:?}"))?;
+        receiver
+            .recv()
+            .map_err(|_| anyhow!("scene readback callback was dropped"))?
+            .map_err(|error| anyhow!("scene readback mapping failed: {error:?}"))?;
+
+        // surface 常见格式是 BGRA，纹理内存里也就是 BGRA；对外一律给 RGBA。
+        let bgra = matches!(
+            self.target.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 4);
+        {
+            let view = readback
+                .slice(..)
+                .get_mapped_range()
+                .map_err(|error| anyhow!("failed to map the readback buffer: {error:?}"))?;
+            for row in 0..height as usize {
+                let start = row * padded_bytes_per_row as usize;
+                let end = start + unpadded_bytes_per_row as usize;
+                let source = &view[start..end];
+                if bgra {
+                    for pixel in source.chunks_exact(4) {
+                        pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+                    }
+                } else {
+                    pixels.extend_from_slice(source);
+                }
+            }
+        }
+        readback.unmap();
+
+        Ok(FrameImage::new(width, height, pixels))
     }
 
     pub fn adapter_name(&self) -> &str {
