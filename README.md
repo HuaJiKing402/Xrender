@@ -25,7 +25,10 @@ MMD（PMX / VMD）是第一个完整接入的格式与着色模型；它的专�
 | 离屏渲染 | ✅ | 场景画到 `scene_color`，再由全屏三角形 blit 到 surface |
 | MSAA / 后处理 / 阴影 | ❌ | 均未实现 |
 | 多模型 / 场景树 | ❌ | `Renderer` 只持一份网格 |
-| 画面回归测试 | ❌ | 无离屏读回、无黄金图 |
+| 无头渲染 | ✅ | `Renderer::new_headless` + `render_offscreen`，不需要窗口与交换链 |
+| 画面读回 / 截图 | ✅ | `read_scene_rgba` 返回 RGBA8，`capture_png` 直接落盘 |
+| 画面回归测试 | ✅ | `tests/golden.rs`，基线图在 `tests/golden/` |
+| GPU 帧计时 | ⚠️ | 时间戳查询路径已就绪；本机驱动读回恒为 0，按「不可用」上报 |
 
 ---
 
@@ -57,7 +60,12 @@ cargo run -p app-desktop -- path/to/model.pmx path/to/motion.vmd
 
 # 渲染固定帧数后退出，适合脚本与回归
 MAX_FRAMES=5 cargo run -p app-desktop -- models/test_cube.obj
+
+# 跑完顺便存一张截图
+MAX_FRAMES=5 CROSS_RENDER_CAPTURE=target/frame.png cargo run -p app-desktop -- models/test_cube_stack.obj
 ```
+
+> Windows PowerShell 用 `$env:MAX_FRAMES='5'` 这类写法设置变量，`A=1 cmd` 的语法只在 bash 里成立。
 
 典型输出：
 
@@ -78,7 +86,27 @@ rendered 5 frames
 cargo test --workspace
 ```
 
-覆盖 OBJ 解析、内置网格、骨骼蒙皮、相机、FPS 统计、toon 轴向检测、PMX/VMD 解析与一个 Vulkan 适配器冒烟测试。
+覆盖 OBJ 解析、内置网格、骨骼蒙皮、相机、FPS 统计、toon 轴向检测、PMX/VMD 解析、画面回读与像素封装、黄金图回归、GPU 计时契约，以及一个 Vulkan 适配器冒烟测试。
+
+### 验证与回归
+
+一个命令跑完格式、lint、构建、测试：
+
+```powershell
+pwsh -File scripts/check.ps1              # 全部
+pwsh -File scripts/check.ps1 -SkipTests   # 没有 GPU 的机器上跳过画面测试
+pwsh -File scripts/check.ps1 -UpdateGolden  # 改了着色后重生成基线图
+```
+
+| 手段 | 命令 | 判据 |
+|---|---|---|
+| 格式 | `cargo fmt --all --check` | 有差异即失败 |
+| Lint | `cargo clippy --workspace --all-targets -- -D warnings` | 任何 warning 即失败 |
+| 构建 | `cargo build --workspace` | — |
+| 单元/集成 | `cargo test --workspace` | 28 个测试 |
+| 画面回归 | `cargo test -p renderer-core --test golden` | 平均通道差 ≤ 3，且单像素差 > 8 的占比 ≤ 1% |
+
+黄金图的基线是仓库里提交的 PNG（`tests/golden/`），由无头渲染生成：320×240、默认轨道相机再偏转成三分之四视角。改了着色确实该变画面时，用 `-UpdateGolden` 重生成，并把新图和代码一起提交、在提交信息里写清为什么变。
 
 ---
 
@@ -105,6 +133,8 @@ cargo test --workspace
 | `MAX_FRAMES` | 渲染 N 帧后自动退出；旧名 `TRIANGLE_MAX_FRAMES` 仍兼容 |
 | `FONT_PATH` | FPS 叠加使用的 OpenType 字体 |
 | `CROSS_RENDER_FPS=0` | 关闭 FPS 叠加 |
+| `CROSS_RENDER_CAPTURE` | 跑完 `MAX_FRAMES` 后把帧存成 PNG 到该路径 |
+| `CROSS_RENDER_GPU_TIME` | 跑完打印一次 GPU 帧耗时；驱动没有可用时钟时打印 `unavailable` |
 
 `VMD_PATH` 不要设成空串——空串会被当成路径，报 `os error 3`。
 
@@ -162,6 +192,8 @@ cargo test --workspace
    - FPS 叠加：`glyphon`，在同一个 pass 末尾用 `depth Always` 绘制。
 3. **blit pass**：全屏三角形把 `scene_color` 搬到 surface，1:1 采样，视觉结果与直画表面一致。
 
+有窗口与无头两条路径共用同一段场景编码：`prepare_frame`（FPS 文本、动画姿态、uniforms）→ `encode_scene` → 有 surface 时再 `encode_blit`。无头模式停在 `encode_scene`，颜色留在 `scene_color` 里等回读；`capture_png` 就是"渲染一帧 → 读回 → 写盘"。
+
 pass 的顺序、管线 key 和绘制范围由 `pass::ScenePasses` 描述，`render_frame` 只做分发；新增一个 pass 是在计划里插一条，而不是改动帧函数内部。
 
 绑定布局：
@@ -206,19 +238,21 @@ pass 的顺序、管线 key 和绘制范围由 `pass::ScenePasses` 描述，`ren
 10. 内核仍持 `MmdMaterial`（`toon_reference` / `sphere_mode`），贴图表也有两套（`texture_slots` 与 `toon_slots`）。
 11. Web / Android / iOS 均未在本机验证。
 12. `Renderer` 是 20 字段、22 方法的大对象；文档（`docs/`）全部滞后于代码。
+13. GPU 计时在本机（RX 5700 XT / Vulkan）读回恒为 0，接口对外报「不可用」；换设备或驱动才能拿到真实数字。
+14. 黄金图基线是本机生成的，跨驱动的容差（平均差 3）刻意放宽，因此它对 1~2 级的颜色偏移不敏感。
 
 ---
 
 ## 开发路线
 
-| 里程碑 | 版本 | 主题 | 核心交付 |
-|---|---|---|---|
-| M0 | v0.8.0 | 可验证性 | 离屏读回、黄金图回归、`check` 脚本、GPU 计时 |
-| M1 | v0.9.0 | 内核与资源分层 | `GpuContext`、资源句柄、多网格、完成 MMD 剥离 |
-| M2 | v0.10.0 | 帧图与渲染特性 | 渲染图、MSAA、tonemap + AA、颜色空间策略 |
-| M3 | v0.11.0 | 场景与光照 | 节点树、光源、阴影、剔除、材质变体 |
-| M4 | v0.12.0 | 资产与动画 | 异步加载、mipmap、压缩纹理、动画修正 |
-| M5 | v1.0.0 | 平台与发布 | 多平台验证、文档重写、版本与性能基线 |
+| 里程碑 | 版本 | 主题 | 核心交付 | 状态 |
+|---|---|---|---|---|
+| M0 | v0.8.0 | 可验证性 | 离屏读回、黄金图回归、`check` 脚本、GPU 计时 | **代码完成**（未打 tag） |
+| M1 | v0.9.0 | 内核与资源分层 | `GpuContext`、资源句柄、多网格、完成 MMD 剥离 | 未开始 |
+| M2 | v0.10.0 | 帧图与渲染特性 | 渲染图、MSAA、tonemap + AA、颜色空间策略 | 未开始 |
+| M3 | v0.11.0 | 场景与光照 | 节点树、光源、阴影、剔除、材质变体 | 未开始 |
+| M4 | v0.12.0 | 资产与动画 | 异步加载、mipmap、压缩纹理、动画修正 | 未开始 |
+| M5 | v1.0.0 | 平台与发布 | 多平台验证、文档重写、版本与性能基线 | 未开始 |
 
 每个里程碑以「先有验收手段，再谈功能」为原则；M0 排在最前就是为了让后续每一步都有可自动判定的依据。
 
@@ -228,7 +262,7 @@ pass 的顺序、管线 key 和绘制范围由 `pass::ScenePasses` 描述，`ren
 
 | 文件 | 内容 | 状态 |
 |---|---|---|
-| `docs/ARCHITECTURE.md` | 架构与 API | 滞后：未记录离屏目标、`pass.rs`、`mmd` crate |
+| `docs/ARCHITECTURE.md` | 架构与 API | 滞后：未记录离屏目标、`pass.rs`、`mmd` crate、无头路径与回读接口 |
 | `docs/BUILD.md` | 各平台构建 | 基本可用 |
 | `docs/PLATFORMS.md` | 平台矩阵 | 基本可用 |
 | `docs/MMD_ROADMAP.md` | MMD 兼容路线 | 部分过期 |
