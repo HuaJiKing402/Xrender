@@ -53,6 +53,47 @@ impl FrameImage {
             .map(|slice| [slice[0], slice[1], slice[2], slice[3]])
     }
 
+    /// 读入一张 PNG 作为 RGBA8 帧，用于与当前画面比对。
+    pub fn load_png(path: &Path) -> Result<Self> {
+        let decoded =
+            image::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let rgba = decoded.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        Ok(Self::new(width, height, rgba.into_raw()))
+    }
+
+    /// 平均每通道绝对差。尺寸不同返回 `None`：那已经是另一张画面。
+    pub fn channel_difference(&self, other: &Self) -> Option<f32> {
+        if self.width != other.width || self.height != other.height || self.pixels.is_empty() {
+            return None;
+        }
+        let total: u64 = self
+            .pixels
+            .iter()
+            .zip(other.pixels.iter())
+            .map(|(a, b)| u64::from((*a as i32 - *b as i32).unsigned_abs()))
+            .sum();
+        Some(total as f32 / self.pixels.len() as f32)
+    }
+
+    /// 任一通道差超过 `tolerance` 的像素占比。
+    ///
+    /// 平均值容易被大片相同背景拉低，这个比例专门盯"局部画错"。
+    pub fn differing_ratio(&self, other: &Self, tolerance: u8) -> Option<f32> {
+        if self.width != other.width || self.height != other.height || self.pixels.is_empty() {
+            return None;
+        }
+        let mut differing = 0u32;
+        for (a, b) in self.pixels.chunks_exact(4).zip(other.pixels.chunks_exact(4)) {
+            if a.iter().zip(b.iter()).any(|(x, y)| {
+                (i32::from(*x) - i32::from(*y)).unsigned_abs() > u32::from(tolerance)
+            }) {
+                differing += 1;
+            }
+        }
+        Some(differing as f32 / (self.pixels.len() / 4) as f32)
+    }
+
     /// 把这一帧写成 PNG。父目录不存在时自动创建。
     pub fn save_png(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
