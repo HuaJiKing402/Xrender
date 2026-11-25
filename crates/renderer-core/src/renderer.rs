@@ -32,7 +32,15 @@ struct Uniforms {
     camera_position: [f32; 4],
     /// 只有 toon.wgsl 读取（sphere map 需要在相机空间算反射）。
     view_rotation: [[f32; 4]; 4],
+    /// 方向光颜色 × 强度；rgb 参与漫反射，a 预留。将来接 VMD 灯光帧时改这里。
+    light: [f32; 4],
 }
+
+/// MMD 原生方向光的默认强度：diffuse 先乘它，再与 ambient 相加。
+///
+/// 不做这一项时 `diffuse(1.0) + ambient(0.5)` 会超过 1，亮面被 clamp 削平，
+/// toon 阴影也失去可见度。
+const MMD_DEFAULT_LIGHT: f32 = 0.6;
 
 fn matrices_to_floats(matrices: &[Mat4]) -> Vec<f32> {
     matrices
@@ -503,6 +511,7 @@ impl Renderer {
             model: model.to_cols_array_2d(),
             camera_position: [eye.x, eye.y, eye.z, 1.0],
             view_rotation: view_rotation.to_cols_array_2d(),
+            light: [MMD_DEFAULT_LIGHT, MMD_DEFAULT_LIGHT, MMD_DEFAULT_LIGHT, 1.0],
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));

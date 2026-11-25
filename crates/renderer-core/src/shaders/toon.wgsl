@@ -3,6 +3,7 @@ struct Uniforms {
     model: mat4x4<f32>,
     camera_position: vec4<f32>,
     view_rotation: mat4x4<f32>,
+    light: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -118,11 +119,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // MMD 的像素合成：贴图 × (diffuse + ambient) × toon ramp。
-    // authored ambient/emissive 与 diffuse 相加后一起被 ramp 调制；
+    // MMD 的像素合成：贴图 × (diffuse × 光强 + ambient) × toon ramp。
+    // diffuse 先乘方向光强度（原生默认约 0.6），再与 ambient 相加；
+    // 少了光强这一项，diffuse(1.0) + ambient(0.5) 会超过 1，亮面被 clamp 削平、
+    // toon 的阴影乘数也被顶到 1 附近，画面就成了一片死平。
     // shade (N·L) 只用于生成 ramp 采样坐标，不再单独乘 diffuse，否则暗部被压暗两次。
-    // 若模型 ambient 是异常常量，应在 PMX 数据侧处理，而不是在 shader 里丢掉。
-    let base = input.color * texel.rgb * (material.diffuse.rgb + material.ambient.rgb);
+    let base = input.color * texel.rgb
+        * (material.diffuse.rgb * uniforms.light.rgb + material.ambient.rgb);
     var color = base * toon;
     // specular_strength 在 PMX 里是高光指数；0 表示关闭高光。
     // 直接 clamp 到 1 会把"关闭"变成一层铺满整个表面的宽高光，所以先门控。

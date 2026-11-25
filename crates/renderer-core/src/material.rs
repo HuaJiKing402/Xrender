@@ -36,23 +36,29 @@ fn is_transparent(material: &MaterialProfile, texture_slots: &[TextureSlot]) -> 
     material.diffuse[3] < 0.999 || texture_alpha_max < 230
 }
 
-/// 解析 toon 贴图：MMD 的 `toon_reference` 决定查外部贴图表还是内置 toon 表；
-/// 索引无效或缺失时回退到内置 toon01，避免整块材质失去明暗层次。
+/// 解析 toon 贴图：MMD 的 `toon_reference` 决定查外部贴图表还是内置 toon 表。
+///
+/// `toon_index < 0` 在 PMX 里的语义是「该材质没有 toon」，此处返回 `None`，
+/// 调用方会保留白色 1×1 贴图——采样得到 1.0，等于不改变颜色、也不产生阴影。
+/// 之前这种情况会回退到 toon01，凭空给无 toon 材质加了一层灰影。
 fn resolve_toon_slot<'a>(
     toon_reference: u8,
     toon_index: i32,
     texture_slots: &'a [TextureSlot],
     toon_slots: &'a [TextureSlot],
 ) -> Option<&'a TextureSlot> {
-    let slots = if toon_reference == 0 {
-        texture_slots
+    // 显式无 toon：保持白色乘数，不要退回内置 toon。
+    if toon_index < 0 {
+        return None;
+    }
+    let index = toon_index as usize;
+    if toon_reference == 0 {
+        // 引用贴图表；索引越界时同样按"无 toon"处理，避免错用别的贴图当 ramp。
+        texture_slots.get(index)
     } else {
-        toon_slots
-    };
-    usize::try_from(toon_index)
-        .ok()
-        .and_then(|index| slots.get(index))
-        .or_else(|| toon_slots.first())
+        // 内置 toon01..10；越界时退到第一张作为兜底。
+        toon_slots.get(index).or_else(|| toon_slots.first())
+    }
 }
 
 pub(crate) fn create_material_state(
