@@ -49,14 +49,27 @@ fn matrices_to_floats(matrices: &[Mat4]) -> Vec<f32> {
         .collect()
 }
 
-/// 平台无关的渲染器：接收一个已经创建好的 surface，负责设备、管线与帧呈现。
+/// 渲染目标的尺寸与颜色格式。
+///
+/// 有窗口时这两项来自 surface，无头渲染时由调用方直接给定；其余所有与分辨率
+/// 绑定的资源（深度、离屏颜色、blit 绑定）只读这一份。
+#[derive(Clone, Copy, Debug)]
+struct TargetInfo {
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+}
+
+/// 平台无关的渲染器：持有设备、管线与一帧的绘制计划，负责把画面呈现出去。
 pub struct Renderer {
     instance: wgpu::Instance,
     adapter_name: String,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
+    /// 有窗口时才有 surface。无头模式下画面只落在 `scene_color` 上。
+    surface: Option<wgpu::Surface<'static>>,
+    config: Option<wgpu::SurfaceConfiguration>,
+    target: TargetInfo,
     pipelines: PipelineCache,
     /// 本帧的 pass 计划：顺序与每步的管线、绘制范围都在这里。
     scene_passes: ScenePasses,
@@ -125,12 +138,47 @@ impl Renderer {
         mesh: Mesh,
         texture_base_dir: &Path,
     ) -> Result<Self> {
+        Self::build(
+            instance,
+            Some(surface),
+            size,
+            backends,
+            mesh,
+            texture_base_dir,
+        )
+        .await
+    }
+
+    /// 无头渲染器：不创建 surface，画面只落在离屏颜色目标里。
+    ///
+    /// 截图、画面回归测试都走这里——它们不需要窗口，也不需要交换链。
+    pub async fn new_headless(
+        instance: wgpu::Instance,
+        size: (u32, u32),
+        backends: wgpu::Backends,
+        mesh: Mesh,
+        texture_base_dir: &Path,
+    ) -> Result<Self> {
+        Self::build(instance, None, size, backends, mesh, texture_base_dir).await
+    }
+
+    async fn build(
+        instance: wgpu::Instance,
+        surface: Option<wgpu::Surface<'static>>,
+        size: (u32, u32),
+        backends: wgpu::Backends,
+        mesh: Mesh,
+        texture_base_dir: &Path,
+    ) -> Result<Self> {
         if !mesh.indices.len().is_multiple_of(3) {
             return Err(anyhow!("mesh index count must be a multiple of 3"));
         }
         if mesh.indices.is_empty() {
             return Err(anyhow!("mesh has no indices"));
         }
+
+        let width = size.0.max(1);
+        let height = size.1.max(1);
 
         let adapter_count = instance.enumerate_adapters(backends).await.len();
         if adapter_count == 0 {
@@ -142,7 +190,7 @@ impl Renderer {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
+                compatible_surface: surface.as_ref(),
                 ..Default::default()
             })
             .await
@@ -156,20 +204,27 @@ impl Renderer {
             .await
             .context("failed to request GPU device")?;
 
-        let capabilities = surface.get_capabilities(&adapter);
-        let format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(|format| format.is_srgb())
-            .or_else(|| capabilities.formats.first().copied())
-            .ok_or_else(|| anyhow!("surface has no supported texture format"))?;
-
-        let mut config = surface
-            .get_default_config(&adapter, size.0.max(1), size.1.max(1))
-            .ok_or_else(|| anyhow!("surface has no supported default configuration"))?;
-        config.format = format;
-        surface.configure(&device, &config);
+        // 有 surface 时必须用它的格式（blit 要往它上面画）；无头时固定选 sRGB RGBA8，
+        // 与桌面端 surface 的实际格式一致，截图才和窗口看到的一样。
+        let (format, config) = match surface.as_ref() {
+            Some(surface) => {
+                let capabilities = surface.get_capabilities(&adapter);
+                let format = capabilities
+                    .formats
+                    .iter()
+                    .copied()
+                    .find(|format| format.is_srgb())
+                    .or_else(|| capabilities.formats.first().copied())
+                    .ok_or_else(|| anyhow!("surface has no supported texture format"))?;
+                let mut config = surface
+                    .get_default_config(&adapter, width, height)
+                    .ok_or_else(|| anyhow!("surface has no supported default configuration"))?;
+                config.format = format;
+                surface.configure(&device, &config);
+                (format, Some(config))
+            }
+            None => (wgpu::TextureFormat::Rgba8UnormSrgb, None),
+        };
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mesh uniforms"),
@@ -365,11 +420,12 @@ impl Renderer {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let depth_texture = create_depth_texture(&device, size.0, size.1);
+        let depth_texture = create_depth_texture(&device, width, height);
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // 离屏颜色目标 + 搬运管线：渲染先落到自己的颜色纹理，再 blit 到 surface。
-        let scene_color = create_scene_color(&device, size.0, size.1, format);
+        // 无头模式下这条链就停在离屏颜色上，回读与截图都从它取数据。
+        let scene_color = create_scene_color(&device, width, height, format);
         let scene_color_view = scene_color.create_view(&wgpu::TextureViewDescriptor::default());
         let blit_layout = blit_bind_group_layout(&device);
         let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -404,6 +460,11 @@ impl Renderer {
             queue,
             surface,
             config,
+            target: TargetInfo {
+                width,
+                height,
+                format,
+            },
             pipelines,
             scene_passes,
             bind_group,
@@ -430,7 +491,7 @@ impl Renderer {
             fps_overlay: None,
             camera: {
                 let mut camera = OrbitCamera::default();
-                camera.set_viewport(size.0, size.1);
+                camera.set_viewport(width, height);
                 camera
             },
             groups: mesh.groups,
@@ -443,11 +504,16 @@ impl Renderer {
 
     /// 尺寸变化时重建所有与分辨率绑定的目标：深度、离屏颜色、blit 绑定。
     fn recreate_targets(&mut self, width: u32, height: u32) {
+        self.target = TargetInfo {
+            width,
+            height,
+            format: self.target.format,
+        };
         self.depth_texture = create_depth_texture(&self.device, width, height);
         self.depth_view = self
             .depth_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.scene_color = create_scene_color(&self.device, width, height, self.config.format);
+        self.scene_color = create_scene_color(&self.device, width, height, self.target.format);
         self.scene_color_view = self
             .scene_color
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -471,12 +537,16 @@ impl Renderer {
         if size.0 == 0 || size.1 == 0 {
             return;
         }
-        if self.config.width == size.0 && self.config.height == size.1 {
+        if self.target.width == size.0 && self.target.height == size.1 {
             return;
         }
-        self.config.width = size.0;
-        self.config.height = size.1;
-        self.surface.configure(&self.device, &self.config);
+        if let Some(config) = self.config.as_mut() {
+            config.width = size.0;
+            config.height = size.1;
+        }
+        if let (Some(surface), Some(config)) = (self.surface.as_ref(), self.config.as_ref()) {
+            surface.configure(&self.device, config);
+        }
         self.recreate_targets(size.0, size.1);
         self.camera.set_viewport(size.0, size.1);
         if let Some(overlay) = &mut self.fps_overlay {
@@ -484,11 +554,14 @@ impl Renderer {
         }
     }
 
-    pub fn render_frame(&mut self) -> Result<()> {
+    /// 刷新本帧的逐帧状态：FPS 文本、动画姿态、全局 uniforms。
+    ///
+    /// 有窗口与无头两条渲染路径共用这一段，它们只差最后往哪里提交。
+    fn prepare_frame(&mut self) {
         let now = Instant::now();
         if let Some(overlay) = &mut self.fps_overlay {
             overlay.tick(now);
-            overlay.update(&self.queue, (self.config.width, self.config.height), now);
+            overlay.update(&self.queue, (self.target.width, self.target.height), now);
             if let Err(error) = overlay.prepare(&self.device, &self.queue) {
                 log::warn!("{error:#}");
             }
@@ -515,7 +588,10 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+    }
 
+    /// 把整帧场景画进离屏颜色目标（深度 prepass / 描边 / 不透明 / 透明 / FPS）。
+    fn encode_scene(&self, encoder: &mut wgpu::CommandEncoder) {
         let transparent_order = transparent_order(
             &self.groups,
             &self.group_centers,
@@ -523,15 +599,135 @@ impl Renderer {
             self.camera.eye(),
         );
 
-        let frame = match self.surface.get_current_texture() {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mesh pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.scene_color_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.02,
+                        g: 0.02,
+                        b: 0.06,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        for scene_pass in self.scene_passes.iter() {
+            log::trace!("scene pass: {}", scene_pass.label);
+            pass.set_pipeline(self.pipelines.get(scene_pass.pipeline));
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            match scene_pass.draw {
+                PassDraw::OpaqueGroups => draw_opaque_groups(
+                    &mut pass,
+                    &self.groups,
+                    &self.material_bind_groups,
+                    &self.material_transparent,
+                ),
+                PassDraw::OutlineGroups => draw_outline_groups(
+                    &mut pass,
+                    &self.groups,
+                    &self.material_bind_groups,
+                    &self.material_outline,
+                    &self.material_transparent,
+                ),
+                PassDraw::TransparentGroupsOrdered => draw_transparent_groups_ordered(
+                    &mut pass,
+                    &self.groups,
+                    &self.material_bind_groups,
+                    &transparent_order,
+                ),
+            }
+        }
+
+        if let Some(overlay) = &self.fps_overlay {
+            if let Err(error) = overlay.render(&mut pass) {
+                log::warn!("{error:#}");
+            }
+        }
+    }
+
+    /// 把离屏结果搬到给定视图。这一步目前是纯搬运，但颜色目标已经独立，
+    /// 后处理 / 截图 / 缩略图都可以挂在这条链上。
+    fn encode_blit(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("blit pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.blit_pipeline);
+        pass.set_bind_group(0, &self.blit_bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// 只渲染到离屏颜色目标，不碰 surface。
+    ///
+    /// 无头模式、截图与画面回归测试走这里；结果留在 `scene_color` 里，
+    /// 由回读接口取走。
+    pub fn render_offscreen(&mut self) -> Result<()> {
+        self.prepare_frame();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("offscreen frame encoder"),
+            });
+        self.encode_scene(&mut encoder);
+        self.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    pub fn render_frame(&mut self) -> Result<()> {
+        // 无 surface 时退化为无头渲染，调用方不必区分两种模式。
+        if self.surface.is_none() {
+            return self.render_offscreen();
+        }
+        self.prepare_frame();
+
+        let acquired = self
+            .surface
+            .as_ref()
+            .expect("surface checked above")
+            .get_current_texture();
+        let frame = match acquired {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
-                let (width, height) = (self.config.width, self.config.height);
+                if let (Some(surface), Some(config)) =
+                    (self.surface.as_ref(), self.config.as_ref())
+                {
+                    surface.configure(&self.device, config);
+                }
+                let (width, height) = (self.target.width, self.target.height);
                 self.recreate_targets(width, height);
                 return Ok(());
             }
@@ -551,95 +747,8 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("mesh pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.scene_color_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02,
-                            g: 0.02,
-                            b: 0.06,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            for scene_pass in self.scene_passes.iter() {
-                log::trace!("scene pass: {}", scene_pass.label);
-                pass.set_pipeline(self.pipelines.get(scene_pass.pipeline));
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                match scene_pass.draw {
-                    PassDraw::OpaqueGroups => draw_opaque_groups(
-                        &mut pass,
-                        &self.groups,
-                        &self.material_bind_groups,
-                        &self.material_transparent,
-                    ),
-                    PassDraw::OutlineGroups => draw_outline_groups(
-                        &mut pass,
-                        &self.groups,
-                        &self.material_bind_groups,
-                        &self.material_outline,
-                        &self.material_transparent,
-                    ),
-                    PassDraw::TransparentGroupsOrdered => draw_transparent_groups_ordered(
-                        &mut pass,
-                        &self.groups,
-                        &self.material_bind_groups,
-                        &transparent_order,
-                    ),
-                }
-            }
-
-            if let Some(overlay) = &self.fps_overlay {
-                if let Err(error) = overlay.render(&mut pass) {
-                    log::warn!("{error:#}");
-                }
-            }
-        }
-
-        // 把离屏结果搬到 surface。这一步目前是纯搬运，但颜色目标已经独立，
-        // 后处理 / 截图 / 缩略图都可以挂在这条链上。
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("blit pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view_texture,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.blit_pipeline);
-            pass.set_bind_group(0, &self.blit_bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        self.encode_scene(&mut encoder);
+        self.encode_blit(&mut encoder, &view_texture);
 
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
@@ -684,8 +793,8 @@ impl Renderer {
         let overlay = FpsOverlay::new(
             &self.device,
             &self.queue,
-            self.config.format,
-            (self.config.width, self.config.height),
+            self.target.format,
+            (self.target.width, self.target.height),
             font_path,
         );
         let enabled = overlay.enabled();
