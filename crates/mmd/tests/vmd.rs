@@ -48,8 +48,6 @@ fn parses_vmd_and_samples_rotation() {
         name: "bone".into(),
         parent: None,
         position: [0.0; 3],
-        layer: 0,
-        flags: 0,
     }];
 
     let mid = clip.sample(7.5, &bones);

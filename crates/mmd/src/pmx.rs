@@ -364,7 +364,8 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
         let name_universal = reader.text(encoding)?;
         let position = reader.vec3("bone position")?;
         let parent_raw = reader.signed_index(bone_index_size, "parent bone")?;
-        let layer = reader.i32("bone layer")?;
+        // 刚度层号只用于变形顺序，蒙皮用不上；读出来推过这一格即可。
+        let _layer = reader.i32("bone layer")?;
         let flags = reader.u16("bone flags")?;
 
         if flags & 0x0001 != 0 {
@@ -411,8 +412,6 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
             },
             parent: usize::try_from(parent_raw).ok(),
             position,
-            layer,
-            flags,
         });
     }
 

@@ -9,8 +9,6 @@ fn bone(position: [f32; 3]) -> Bone {
         name: "root".into(),
         parent: None,
         position,
-        layer: 0,
-        flags: 0,
     }
 }
 

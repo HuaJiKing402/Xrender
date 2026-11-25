@@ -20,12 +20,14 @@ pub struct MeshVertex {
 
 /// PMX 骨骼（v0.6 用于蒙皮）。
 #[derive(Clone, Debug)]
+/// 骨骼：蒙皮只需要"相对父骨骼的偏移"这一件事。
+///
+/// MMD 的骨骼还带刚度层号、绘制标志位、IK 链等一大套约定，那些由装载器自己解释，
+/// 用完即弃，不进这里——内核不认识 MMD。
 pub struct Bone {
     pub name: String,
     pub parent: Option<usize>,
     pub position: [f32; 3],
-    pub layer: i32,
-    pub flags: u16,
 }
 
 /// 描边设置：内核只认"要不要描边 + 颜色 + 宽度"，怎么画由管线决定。
