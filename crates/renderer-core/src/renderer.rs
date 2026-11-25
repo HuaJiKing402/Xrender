@@ -11,10 +11,7 @@ use crate::{
     capture::FrameImage,
     gpu::GpuContext,
     material::create_material_state,
-    model::{
-        texture::{self, TextureSlot},
-        Bone, Mesh,
-    },
+    model::{texture::TextureTable, Bone, Mesh},
     overlay::FpsOverlay,
     pass::{PassDraw, ScenePasses},
     pipeline::PipelineCache,
@@ -97,8 +94,8 @@ pub struct Renderer {
     material_bind_groups: Vec<wgpu::BindGroup>,
     material_transparent: Vec<bool>,
     material_outline: Vec<bool>,
-    texture_slots: Vec<TextureSlot>,
-    toon_slots: Vec<TextureSlot>,
+    /// 模型装载后留在 GPU 上的全部贴图（漫反射 + ramp + 白色兜底）。
+    textures: TextureTable,
     // 由 material bind group 持有，但 Rust 侧无需再次读取
     #[allow(dead_code)]
     sampler: wgpu::Sampler,
@@ -424,27 +421,14 @@ impl Renderer {
             ],
         });
 
-        let mut texture_slots =
-            texture::load_textures(&device, &queue, texture_base_dir, &mesh.texture_paths)?;
-        let fallback_texture = texture::white_texture(&device, &queue, "white-fallback");
-        let fallback_view = fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        texture_slots.push(TextureSlot {
-            label: "white-fallback".into(),
-            texture: fallback_texture,
-            view: fallback_view.clone(),
-            alpha_max: 255,
-            toon: Default::default(),
-        });
-        let toon_slots = texture::load_toon_textures(&device, &queue, texture_base_dir);
+        let textures = TextureTable::load(&device, &queue, texture_base_dir, &mesh.texture_paths)?;
 
         let material_state = create_material_state(
             &device,
             &material_layout,
             &sampler,
             &ramp_sampler,
-            &texture_slots,
-            &toon_slots,
-            &fallback_view,
+            &textures,
             &mesh.materials,
         );
         let material_bind_groups = material_state.bind_groups;
@@ -546,8 +530,7 @@ impl Renderer {
             material_bind_groups,
             material_transparent,
             material_outline,
-            texture_slots,
-            toon_slots,
+            textures,
             sampler,
             vertex_buffer,
             index_buffer,
@@ -1060,11 +1043,11 @@ impl Renderer {
     }
 
     pub fn texture_count(&self) -> usize {
-        self.texture_slots.len().saturating_sub(1)
+        self.textures.diffuse().len()
     }
 
     pub fn toon_texture_count(&self) -> usize {
-        self.toon_slots.len()
+        self.textures.ramps().len()
     }
 
     pub fn bone_count(&self) -> usize {

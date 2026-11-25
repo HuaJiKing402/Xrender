@@ -1,6 +1,6 @@
 use wgpu::util::DeviceExt;
 
-use crate::model::{texture::TextureSlot, MaterialProfile, ShadingData};
+use crate::model::{texture::TextureTable, MaterialProfile, ShadingData};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -27,58 +27,29 @@ const OUTLINE_WIDTH_RATIO: f32 = 0.012;
 
 /// 材质整体半透明（或 alpha 通道整体偏低）时才使用 blend；
 /// 普通局部镂空走 alpha cutoff，避免大材质失去深度写入。
-fn is_transparent(material: &MaterialProfile, texture_slots: &[TextureSlot]) -> bool {
+fn is_transparent(material: &MaterialProfile, textures: &TextureTable) -> bool {
     let texture_alpha_max = material
         .texture_index
-        .and_then(|index| texture_slots.get(index))
+        .and_then(|index| textures.diffuse_slot(index))
         .map(|slot| slot.alpha_max)
         .unwrap_or(255);
     material.diffuse[3] < 0.999 || texture_alpha_max < 230
 }
 
-/// 解析 toon 贴图：MMD 的 `toon_reference` 决定查外部贴图表还是内置 toon 表。
-///
-/// `toon_index < 0` 在 PMX 里的语义是「该材质没有 toon」，此处返回 `None`，
-/// 调用方会保留白色 1×1 贴图——采样得到 1.0，等于不改变颜色、也不产生阴影。
-/// 之前这种情况会回退到 toon01，凭空给无 toon 材质加了一层灰影。
-fn resolve_toon_slot<'a>(
-    toon_reference: u8,
-    toon_index: i32,
-    texture_slots: &'a [TextureSlot],
-    toon_slots: &'a [TextureSlot],
-) -> Option<&'a TextureSlot> {
-    // 显式无 toon：保持白色乘数，不要退回内置 toon。
-    if toon_index < 0 {
-        return None;
-    }
-    let index = toon_index as usize;
-    if toon_reference == 0 {
-        // 引用贴图表；索引越界时同样按"无 toon"处理，避免错用别的贴图当 ramp。
-        texture_slots.get(index)
-    } else {
-        // 内置 toon01..10；越界时退到第一张作为兜底。
-        toon_slots.get(index).or_else(|| toon_slots.first())
-    }
-}
-
 /// 为每个材质建一个 bind group。
 ///
-/// 参数多是因为每个材质都要绑定"贴图表 + 采样器 + toon 表 + 兜底视图"这一整组
-/// 资源；M1 把它们收进 GPU 上下文与贴图表之后，这里的签名会自然缩短。
-#[allow(clippy::too_many_arguments)]
+/// 贴图、ramp 与白色兜底都从 `TextureTable` 里来，这里只需要表和两个采样器。
 pub(crate) fn create_material_state(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
     ramp_sampler: &wgpu::Sampler,
-    texture_slots: &[TextureSlot],
-    toon_slots: &[TextureSlot],
-    fallback_view: &wgpu::TextureView,
+    textures: &TextureTable,
     materials: &[MaterialProfile],
 ) -> MaterialState {
     let transparent: Vec<bool> = materials
         .iter()
-        .map(|material| is_transparent(material, texture_slots))
+        .map(|material| is_transparent(material, textures))
         .collect();
     let outline: Vec<bool> = materials
         .iter()
@@ -100,8 +71,8 @@ pub(crate) fn create_material_state(
             let mut specular = [0.0f32; 4];
             let mut sphere_mode = 0.0f32;
             let mut sphere_enabled = false;
-            let mut toon_view = fallback_view.clone();
-            let mut sphere_view = fallback_view.clone();
+            let mut toon_view = textures.white_view().clone();
+            let mut sphere_view = textures.white_view().clone();
             match &material.shading {
                 ShadingData::Unlit => {}
                 ShadingData::Mmd(mmd) => {
@@ -113,18 +84,13 @@ pub(crate) fn create_material_state(
                         material.specular_strength,
                     ];
                     sphere_mode = f32::from(mmd.sphere_mode);
-                    if let Some(slot) = resolve_toon_slot(
-                        mmd.toon_reference,
-                        mmd.toon_index,
-                        texture_slots,
-                        toon_slots,
-                    ) {
+                    if let Some(slot) = textures.resolve_ramp(mmd.toon_reference, mmd.toon_index) {
                         toon_view = slot.view.clone();
                         toon_code = slot.toon.code();
                     }
                     if let Some(view) = mmd
                         .sphere_index
-                        .and_then(|index| texture_slots.get(index))
+                        .and_then(|index| textures.diffuse_slot(index))
                         .map(|slot| slot.view.clone())
                     {
                         sphere_view = view;
@@ -153,9 +119,9 @@ pub(crate) fn create_material_state(
             });
             let diffuse_view = material
                 .texture_index
-                .and_then(|index| texture_slots.get(index))
+                .and_then(|index| textures.diffuse_slot(index))
                 .map(|slot| slot.view.clone())
-                .unwrap_or_else(|| fallback_view.clone());
+                .unwrap_or_else(|| textures.white_view().clone());
 
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(&format!("material {}", material.name)),

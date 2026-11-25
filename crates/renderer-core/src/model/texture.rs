@@ -167,7 +167,7 @@ fn create_texture_from_rgba(
     texture
 }
 
-pub fn white_texture(device: &Device, queue: &Queue, label: &str) -> Texture {
+fn white_texture(device: &Device, queue: &Queue, label: &str) -> Texture {
     create_texture_from_rgba(device, queue, label, 1, 1, &[255, 255, 255, 255])
 }
 
@@ -286,7 +286,7 @@ fn toon_search_dirs(base_dir: &Path) -> Vec<PathBuf> {
 }
 
 /// 加载 toon01-toon10：外部文件优先，全部缺失时回退到打包的官方原图。
-pub fn load_toon_textures(device: &Device, queue: &Queue, base_dir: &Path) -> Vec<TextureSlot> {
+fn load_ramp_textures(device: &Device, queue: &Queue, base_dir: &Path) -> Vec<TextureSlot> {
     // 每个目录只扫一次，避免对每个候选名做 open 探测。
     let scans: Vec<HashMap<String, (u8, PathBuf)>> = toon_search_dirs(base_dir)
         .iter()
@@ -334,7 +334,7 @@ pub fn load_toon_textures(device: &Device, queue: &Queue, base_dir: &Path) -> Ve
 
 /// 按 PMX 纹理表加载贴图；路径相对 PMX 所在目录。
 /// 缺失或解码失败时回退为 1×1 白色贴图，不中断模型加载。
-pub fn load_textures(
+fn load_textures(
     device: &Device,
     queue: &Queue,
     base_dir: &Path,
@@ -391,6 +391,89 @@ pub fn load_textures(
         });
     }
     Ok(slots)
+}
+
+/// 一个模型装载后留在 GPU 上的全部贴图。
+///
+/// 从前漫反射贴图、toon 贴图和那张白色兜底是三份独立数据：漫反射表末尾塞一个
+/// 兜底条目、toon 表另起一份、材质构造时再把 `fallback_view` 单独传进去，于是
+/// `create_material_state` 要收三个和贴图有关的参数。合并成一张表之后，内核只需
+/// 拿一个 `&TextureTable`，加新用途的贴图（球面图之类）也在这里加一列即可。
+pub struct TextureTable {
+    diffuse: Vec<TextureSlot>,
+    ramps: Vec<TextureSlot>,
+    white: TextureSlot,
+}
+
+impl TextureTable {
+    /// 装载模型贴图、ramp 贴图与白色兜底。
+    pub fn load(device: &Device, queue: &Queue, base_dir: &Path, paths: &[String]) -> Result<Self> {
+        let diffuse = load_textures(device, queue, base_dir, paths)?;
+        let ramps = load_ramp_textures(device, queue, base_dir);
+        let white = slot_from_texture(
+            "white-fallback".into(),
+            white_texture(device, queue, "white-fallback"),
+            255,
+            ToonSampling::default(),
+        );
+        Ok(Self {
+            diffuse,
+            ramps,
+            white,
+        })
+    }
+
+    /// 模型自带的贴图表。
+    pub fn diffuse(&self) -> &[TextureSlot] {
+        &self.diffuse
+    }
+
+    pub fn diffuse_slot(&self, index: usize) -> Option<&TextureSlot> {
+        self.diffuse.get(index)
+    }
+
+    /// ramp（渐变）贴图表：内置 toon01–10 或模型目录里的同名文件。
+    pub fn ramps(&self) -> &[TextureSlot] {
+        &self.ramps
+    }
+
+    /// 白色 1×1 贴图：采样得 1.0，用来表示"这一路不需要贴图，也不要阴影"。
+    pub fn white_view(&self) -> &TextureView {
+        &self.white.view
+    }
+
+    /// 按 MMD 的两个字段挑 ramp：`reference == 0` 指漫反射表里的图当 ramp，
+    /// 其余指内置 ramp 表；`index < 0` 表示该材质没有 toon，返回 `None`，
+    /// 调用方保留白色贴图——采样得到 1.0，既不改变颜色也不产生阴影。
+    /// 索引越界同样按"无 ramp"处理，避免错拿别的贴图。
+    pub fn resolve_ramp(&self, reference: u8, index: i32) -> Option<&TextureSlot> {
+        if index < 0 {
+            return None;
+        }
+        let index = index as usize;
+        if reference == 0 {
+            self.diffuse.get(index)
+        } else {
+            // 内置 ramp 表越界时退到第一张作为兜底。
+            self.ramps.get(index).or_else(|| self.ramps.first())
+        }
+    }
+}
+
+fn slot_from_texture(
+    label: String,
+    texture: Texture,
+    alpha_max: u8,
+    toon: ToonSampling,
+) -> TextureSlot {
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    TextureSlot {
+        label,
+        texture,
+        view,
+        alpha_max,
+        toon,
+    }
 }
 
 #[cfg(test)]
