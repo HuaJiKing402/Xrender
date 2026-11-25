@@ -50,6 +50,20 @@ fn matrices_to_floats(matrices: &[Mat4]) -> Vec<f32> {
         .collect()
 }
 
+/// 时间戳查询需要的缓冲区：一个接时间戳解析结果，一个给 CPU 映射读回。
+///
+/// 两者必须分开——`MAP_READ` 不能和 `COPY_DST` 混在同一个 buffer 上。
+///
+/// 只在适配器支持 `TIMESTAMP_QUERY` 时创建；不支持的设备上整条链路为 `None`，
+/// 计时接口直接返回"不支持"，而不是给一个假数字。
+struct GpuTimer {
+    query_set: wgpu::QuerySet,
+    /// 解析查询结果的目标，只给 GPU 用。
+    resolve: wgpu::Buffer,
+    /// 拷过来再映射，避免整个 resolve buffer 变成 CPU 可读。
+    readback: wgpu::Buffer,
+}
+
 /// 渲染目标的尺寸与颜色格式。
 ///
 /// 有窗口时这两项来自 surface，无头渲染时由调用方直接给定；其余所有与分辨率
@@ -99,6 +113,8 @@ pub struct Renderer {
     blit_pipeline: wgpu::RenderPipeline,
     blit_bind_group: wgpu::BindGroup,
     fps_overlay: Option<FpsOverlay>,
+    /// 设备支持时间戳查询时才有值。
+    gpu_timer: Option<GpuTimer>,
     camera: OrbitCamera,
     groups: Vec<crate::model::MaterialGroup>,
     group_centers: Vec<Vec3>,
@@ -200,10 +216,59 @@ impl Renderer {
         let adapter_name = adapter.get_info().name;
         log::info!("adapter: {adapter_name}");
 
+        // 时间戳查询不是所有适配器都有；有才要，没有就走"不支持"分支。
+        // 在编码器里写时间戳需要额外 feature，这台机器有，就一并要上；
+        // 拿不到就退回 pass 级写法（见 measure_gpu_time）。
+        let adapter_features = adapter.features();
+        let timestamp_queries = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
+        let timestamp_in_encoders =
+            adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+        let mut required_features = wgpu::Features::empty();
+        if timestamp_queries {
+            required_features |= wgpu::Features::TIMESTAMP_QUERY;
+            if timestamp_in_encoders {
+                required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+            }
+        }
+
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features,
+                ..Default::default()
+            })
             .await
             .context("failed to request GPU device")?;
+
+        let gpu_timer = if device.features().contains(
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        ) {
+            let byte_size = 2 * std::mem::size_of::<u64>() as u64;
+            Some(GpuTimer {
+                query_set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("frame timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: 2,
+                }),
+                resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("timestamp resolve"),
+                    size: byte_size,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+                readback: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("timestamp readback"),
+                    size: byte_size,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                }),
+            })
+        } else {
+            log::info!(
+                "GPU frame timing unavailable: adapter lacks TIMESTAMP_QUERY or \
+                 TIMESTAMP_QUERY_INSIDE_ENCODERS"
+            );
+            None
+        };
 
         // 有 surface 时必须用它的格式（blit 要往它上面画）；无头时固定选 sRGB RGBA8，
         // 与桌面端 surface 的实际格式一致，截图才和窗口看到的一样。
@@ -490,6 +555,7 @@ impl Renderer {
             blit_pipeline,
             blit_bind_group,
             fps_overlay: None,
+            gpu_timer,
             camera: {
                 let mut camera = OrbitCamera::default();
                 camera.set_viewport(width, height);
@@ -857,6 +923,74 @@ impl Renderer {
         self.render_offscreen()?;
         let image = self.read_scene_rgba()?;
         image.save_png(path)
+    }
+
+    /// 测量一帧场景在 GPU 上的耗时。
+    ///
+    /// 现场渲染一帧并阻塞等待时间戳读回，属于按需测量，不要放进每帧循环。
+    /// 返回 `Ok(None)` 表示这台设备的适配器不支持时间戳查询。
+    pub fn measure_gpu_time(&mut self) -> Result<Option<std::time::Duration>> {
+        if self.gpu_timer.is_none() {
+            return Ok(None);
+        }
+
+        self.prepare_frame();
+        let timer = self.gpu_timer.as_ref().expect("gpu timer checked above");
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("gpu timer encoder"),
+            });
+        // 用编码器级时间戳把整段场景包起来：不依赖某个 render pass 的首尾，
+        // 后面加 pass 或换帧结构都不用改这里。
+        encoder.write_timestamp(&timer.query_set, 0);
+        self.encode_scene(&mut encoder);
+        encoder.write_timestamp(&timer.query_set, 1);
+        encoder.resolve_query_set(&timer.query_set, 0..2, &timer.resolve, 0);
+        encoder.copy_buffer_to_buffer(&timer.resolve, 0, &timer.readback, 0, 16);
+        self.queue.submit(Some(encoder.finish()));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        timer
+            .readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| anyhow!("waiting for the timestamps failed: {error:?}"))?;
+        receiver
+            .recv()
+            .map_err(|_| anyhow!("timestamp readback callback was dropped"))?
+            .map_err(|error| anyhow!("timestamp readback mapping failed: {error:?}"))?;
+
+        let (begin, end) = {
+            let view = timer
+                .readback
+                .slice(..)
+                .get_mapped_range()
+                .map_err(|error| anyhow!("failed to map the timestamp buffer: {error:?}"))?;
+            let bytes: &[u8] = &view;
+            let begin = u64::from_le_bytes(bytes[0..8].try_into().expect("8 bytes"));
+            let end = u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes"));
+            (begin, end)
+        };
+        timer.readback.unmap();
+
+        // 有些驱动声称支持时间戳，实际写出来全是 0（本机的 RX 5700 XT 就是这样）。
+        // 这种情况按"没有可用时钟"处理，绝不返回一个看起来正常的 0 ms。
+        if begin == 0 && end == 0 {
+            log::warn!("GPU timestamps read back as zero; the driver exposes no usable clock");
+            return Ok(None);
+        }
+
+        // 时间戳是设备时钟的滴答数，乘上每滴答多少纳秒才是真实时间。
+        let period_ns = f64::from(self.queue.get_timestamp_period());
+        let elapsed_ns = end.saturating_sub(begin) as f64 * period_ns;
+        Ok(Some(std::time::Duration::from_secs_f64(
+            elapsed_ns / 1_000_000_000.0,
+        )))
     }
 
     pub fn adapter_name(&self) -> &str {
