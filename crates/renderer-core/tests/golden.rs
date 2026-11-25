@@ -43,7 +43,7 @@ const ORBIT_PITCH_PIXELS: f32 = 70.0;
 /// 用固定相机把模型渲染到离屏目标，取回像素。
 fn render(model_file: &str) -> FrameImage {
     let models = models_dir();
-    let mesh = model::load_from_path(&models.join(model_file))
+    let mesh = model::load_from_path(models.join(model_file))
         .unwrap_or_else(|error| panic!("failed to load {model_file}: {error:#}"));
     let mut renderer = pollster::block_on(Renderer::new_headless(
         backend::create_instance(),
@@ -86,7 +86,10 @@ fn check(name: &str, frame: &FrameImage) {
     let ratio = frame
         .differing_ratio(&baseline, PIXEL_TOLERANCE)
         .expect("baseline size differs from the rendered frame");
-    println!("{name}: mean channel difference {mean:.2}, {:.2}% pixels off", ratio * 100.0);
+    println!(
+        "{name}: mean channel difference {mean:.2}, {:.2}% pixels off",
+        ratio * 100.0
+    );
 
     assert!(
         mean <= MAX_MEAN_DIFFERENCE,

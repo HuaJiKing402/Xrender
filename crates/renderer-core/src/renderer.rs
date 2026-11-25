@@ -723,8 +723,7 @@ impl Renderer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                if let (Some(surface), Some(config)) =
-                    (self.surface.as_ref(), self.config.as_ref())
+                if let (Some(surface), Some(config)) = (self.surface.as_ref(), self.config.as_ref())
                 {
                     surface.configure(&self.device, config);
                 }
@@ -838,7 +837,7 @@ impl Renderer {
                 let end = start + unpadded_bytes_per_row as usize;
                 let source = &view[start..end];
                 if bgra {
-                    for pixel in source.chunks_exact(4) {
+                    for pixel in source.as_chunks::<4>().0 {
                         pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
                     }
                 } else {

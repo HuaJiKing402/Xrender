@@ -67,23 +67,12 @@ impl BezierCurve {
 }
 
 /// 一个骨骼关键帧的四通道插值曲线，对应 VMD 的 64 字节。
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BoneInterpolation {
     pub x: BezierCurve,
     pub y: BezierCurve,
     pub z: BezierCurve,
     pub rotation: BezierCurve,
-}
-
-impl Default for BoneInterpolation {
-    fn default() -> Self {
-        Self {
-            x: BezierCurve::default(),
-            y: BezierCurve::default(),
-            z: BezierCurve::default(),
-            rotation: BezierCurve::default(),
-        }
-    }
 }
 
 fn cubic(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {

@@ -61,6 +61,11 @@ fn resolve_toon_slot<'a>(
     }
 }
 
+/// 为每个材质建一个 bind group。
+///
+/// 参数多是因为每个材质都要绑定"贴图表 + 采样器 + toon 表 + 兜底视图"这一整组
+/// 资源；M1 把它们收进 GPU 上下文与贴图表之后，这里的签名会自然缩短。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_material_state(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,

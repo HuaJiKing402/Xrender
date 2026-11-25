@@ -84,10 +84,17 @@ impl FrameImage {
             return None;
         }
         let mut differing = 0u32;
-        for (a, b) in self.pixels.chunks_exact(4).zip(other.pixels.chunks_exact(4)) {
-            if a.iter().zip(b.iter()).any(|(x, y)| {
-                (i32::from(*x) - i32::from(*y)).unsigned_abs() > u32::from(tolerance)
-            }) {
+        for (a, b) in self
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(other.pixels.as_chunks::<4>().0.iter())
+        {
+            if a.iter()
+                .zip(b.iter())
+                .any(|(x, y)| (i32::from(*x) - i32::from(*y)).unsigned_abs() > u32::from(tolerance))
+            {
                 differing += 1;
             }
         }
