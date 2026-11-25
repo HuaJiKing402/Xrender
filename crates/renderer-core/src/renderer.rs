@@ -18,9 +18,9 @@ use crate::{
     pass::{PassDraw, ScenePasses},
     pipeline::PipelineCache,
     renderer_helpers::{
-        blit_bind_group_layout, create_blit_pipeline, create_depth_texture, create_scene_color,
-        draw_opaque_groups, draw_outline_groups, draw_transparent_groups_ordered, group_centers,
-        transparent_order,
+        blit_bind_group_layout, create_blit_pipeline, create_depth_texture, create_resolve_target,
+        create_scene_color, draw_opaque_groups, draw_outline_groups,
+        draw_transparent_groups_ordered, group_centers, transparent_order,
     },
     skinning::{compute_bone_matrices, Pose},
 };
@@ -73,6 +73,8 @@ struct TargetInfo {
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
+    /// 场景颜色目标的采样数；1 表示不做多重采样。
+    samples: u32,
 }
 
 /// 平台无关的渲染器：持有设备、管线与一帧的绘制计划，负责把画面呈现出去。
@@ -108,6 +110,9 @@ pub struct Renderer {
     /// 场景颜色先画到这里，再由 blit pass 搬到 surface。
     scene_color: wgpu::Texture,
     scene_color_view: wgpu::TextureView,
+    /// 开启 MSAA 时的多重采样渲染目标；单采样时为空，场景直接画进 `scene_color`。
+    scene_msaa: Option<wgpu::Texture>,
+    scene_msaa_view: Option<wgpu::TextureView>,
     blit_layout: wgpu::BindGroupLayout,
     blit_sampler: wgpu::Sampler,
     blit_pipeline: wgpu::RenderPipeline,
@@ -196,7 +201,6 @@ impl Renderer {
 
         let width = size.0.max(1);
         let height = size.1.max(1);
-
         let adapter_count = instance.enumerate_adapters(backends).await.len();
         if adapter_count == 0 {
             return Err(anyhow!(
@@ -291,6 +295,16 @@ impl Renderer {
             }
             None => (wgpu::TextureFormat::Rgba8UnormSrgb, None),
         };
+
+        // 多重采样级别由格式特性决定；深度附件必须同采样数，跟不上就整体关掉。
+        let color_features = adapter.get_texture_format_features(format);
+        let depth_features =
+            adapter.get_texture_format_features(crate::renderer_helpers::DEPTH_FORMAT);
+        let mut samples = crate::renderer_helpers::choose_sample_count(color_features.flags);
+        if !depth_features.flags.sample_count_supported(samples) {
+            samples = 1;
+        }
+        log::info!("scene target: {format:?}, {samples}x samples");
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mesh uniforms"),
@@ -474,6 +488,7 @@ impl Renderer {
             &pipeline_layout,
             format,
             has_outline,
+            samples,
         );
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -486,12 +501,25 @@ impl Renderer {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let depth_texture = create_depth_texture(&device, width, height);
+        let depth_texture = create_depth_texture(&device, width, height, samples);
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // 离屏颜色目标 + 搬运管线：渲染先落到自己的颜色纹理，再 blit 到 surface。
-        // 无头模式下这条链就停在离屏颜色上，回读与截图都从它取数据。
-        let scene_color = create_scene_color(&device, width, height, format);
+        // 开 MSAA 时这里是多重采样目标，场景画完后解析进 `scene_color`（单采样、可采样、
+        // 可回读）；关闭时场景直接画进 `scene_color`。
+        // 无头模式下这条链停在 `scene_color` 上，回读与截图都从它取数据。
+        let scene_msaa = if samples > 1 {
+            Some(create_scene_color(&device, width, height, format, samples))
+        } else {
+            None
+        };
+        let scene_msaa_view = scene_msaa
+            .as_ref()
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        let scene_color = match scene_msaa.is_some() {
+            true => create_resolve_target(&device, width, height, format),
+            false => create_scene_color(&device, width, height, format, 1),
+        };
         let scene_color_view = scene_color.create_view(&wgpu::TextureViewDescriptor::default());
         let blit_layout = blit_bind_group_layout(&device);
         let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -530,6 +558,7 @@ impl Renderer {
                 width,
                 height,
                 format,
+                samples,
             },
             pipelines,
             scene_passes,
@@ -550,6 +579,8 @@ impl Renderer {
             depth_view,
             scene_color,
             scene_color_view,
+            scene_msaa,
+            scene_msaa_view,
             blit_layout,
             blit_sampler,
             blit_pipeline,
@@ -571,16 +602,37 @@ impl Renderer {
 
     /// 尺寸变化时重建所有与分辨率绑定的目标：深度、离屏颜色、blit 绑定。
     fn recreate_targets(&mut self, width: u32, height: u32) {
+        let samples = self.target.samples;
+        let format = self.target.format;
         self.target = TargetInfo {
             width,
             height,
-            format: self.target.format,
+            format,
+            samples,
         };
-        self.depth_texture = create_depth_texture(&self.device, width, height);
+        self.depth_texture = create_depth_texture(&self.device, width, height, samples);
         self.depth_view = self
             .depth_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.scene_color = create_scene_color(&self.device, width, height, self.target.format);
+        self.scene_msaa = if samples > 1 {
+            Some(create_scene_color(
+                &self.device,
+                width,
+                height,
+                format,
+                samples,
+            ))
+        } else {
+            None
+        };
+        self.scene_msaa_view = self
+            .scene_msaa
+            .as_ref()
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        self.scene_color = match self.scene_msaa.is_some() {
+            true => create_resolve_target(&self.device, width, height, format),
+            false => create_scene_color(&self.device, width, height, format, 1),
+        };
         self.scene_color_view = self
             .scene_color
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -666,12 +718,24 @@ impl Renderer {
             self.camera.eye(),
         );
 
+        // 开 MSAA 时画进多重采样目标，同时指定解析目标：本 pass 结束时
+        // 硬件把多个样本平均进 `scene_color`，后面的 blit 与回读只看它。
+        let color_view = self
+            .scene_msaa_view
+            .as_ref()
+            .unwrap_or(&self.scene_color_view);
+        let resolve_target = if self.scene_msaa_view.is_some() {
+            Some(&self.scene_color_view)
+        } else {
+            None
+        };
+
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mesh pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.scene_color_view,
+                view: color_view,
                 depth_slice: None,
-                resolve_target: None,
+                resolve_target,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.02,
@@ -1029,6 +1093,7 @@ impl Renderer {
             &self.queue,
             self.target.format,
             (self.target.width, self.target.height),
+            self.target.samples,
             font_path,
         );
         let enabled = overlay.enabled();

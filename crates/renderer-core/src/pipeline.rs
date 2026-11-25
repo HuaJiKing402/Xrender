@@ -103,10 +103,11 @@ impl PipelineCache {
         device: &wgpu::Device,
         layout: &PipelineLayout,
         format: TextureFormat,
+        samples: u32,
         key: PipelineKey,
     ) -> PipelineKey {
         if !self.entries.contains_key(&key) {
-            let pipeline = self.build(device, layout, format, key);
+            let pipeline = self.build(device, layout, format, samples, key);
             self.entries.insert(key, pipeline);
         }
         key
@@ -123,6 +124,7 @@ impl PipelineCache {
         device: &wgpu::Device,
         layout: &PipelineLayout,
         format: TextureFormat,
+        samples: u32,
         key: PipelineKey,
     ) -> RenderPipeline {
         let module = match key.shading {
@@ -173,7 +175,10 @@ impl PipelineCache {
                 ..Default::default()
             },
             depth_stencil: Some(depth_stencil),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: samples.max(1),
+                ..Default::default()
+            },
             multiview_mask: None,
             cache: None,
         })

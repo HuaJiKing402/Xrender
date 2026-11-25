@@ -138,14 +138,48 @@ pub(crate) fn depth_state_with(
 
 /// 离屏场景颜色目标。格式与 surface 一致，这样 blit 不需要做格式转换，
 /// 颜色在 sRGB 目标上做一次线性→编码的往返，结果与直接画到 surface 等同。
+///
+/// `samples > 1` 时这是多重采样目标，不能直接采样或拷贝，必须由
+/// [`create_resolve_target`] 解析成单采样；此时也就不需要 `TEXTURE_BINDING`。
 pub(crate) fn create_scene_color(
+    device: &Device,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    samples: u32,
+) -> Texture {
+    let usage = if samples > 1 {
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+    } else {
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+    };
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("scene color"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: samples.max(1),
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage,
+        view_formats: &[],
+    })
+}
+
+/// 多重采样目标的解析结果：单采样、可采样、可回读。
+pub(crate) fn create_resolve_target(
     device: &Device,
     width: u32,
     height: u32,
     format: TextureFormat,
 ) -> Texture {
     device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("scene color"),
+        label: Some("scene resolve"),
         size: wgpu::Extent3d {
             width: width.max(1),
             height: height.max(1),
@@ -162,7 +196,22 @@ pub(crate) fn create_scene_color(
     })
 }
 
-pub(crate) fn create_depth_texture(device: &Device, width: u32, height: u32) -> Texture {
+/// 选多重采样级别：优先 4x，退 2x，都不支持就关掉。
+///
+/// 只读格式特性里的 `MULTISAMPLE_X*` 标志，不假设"桌面端一定有 4x"。
+pub(crate) fn choose_sample_count(flags: wgpu::TextureFormatFeatureFlags) -> u32 {
+    [4u32, 2]
+        .into_iter()
+        .find(|count| flags.sample_count_supported(*count))
+        .unwrap_or(1)
+}
+
+pub(crate) fn create_depth_texture(
+    device: &Device,
+    width: u32,
+    height: u32,
+    samples: u32,
+) -> Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth texture"),
         size: wgpu::Extent3d {
@@ -171,7 +220,7 @@ pub(crate) fn create_depth_texture(device: &Device, width: u32, height: u32) -> 
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count: samples.max(1),
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,

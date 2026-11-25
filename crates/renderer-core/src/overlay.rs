@@ -37,11 +37,13 @@ pub(crate) struct FpsOverlay {
 }
 
 impl FpsOverlay {
+    /// `samples` 必须与场景颜色目标的采样数一致，否则文字管线与附件不匹配。
     pub fn new(
         device: &Device,
         queue: &Queue,
         format: TextureFormat,
         size: (u32, u32),
+        samples: u32,
         font_path: Option<&Path>,
     ) -> Self {
         let (mut font_system, family, enabled) = build_font_system(font_path);
@@ -54,7 +56,10 @@ impl FpsOverlay {
         let text_renderer = TextRenderer::new(
             &mut atlas,
             device,
-            MultisampleState::default(),
+            MultisampleState {
+                count: samples.max(1),
+                ..Default::default()
+            },
             Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(false),

@@ -40,12 +40,15 @@ pub(crate) struct ScenePasses {
 
 impl ScenePasses {
     /// 根据场景内容（是否有描边）构建 pass 计划，同时保证对应管线存在。
+    ///
+    /// `samples` 是场景颜色目标的采样数：管线必须与附件一致，否则创建时就报错。
     pub fn build(
         cache: &mut PipelineCache,
         device: &wgpu::Device,
         layout: &PipelineLayout,
         format: TextureFormat,
         has_outline: bool,
+        samples: u32,
     ) -> Self {
         let mut passes = Vec::with_capacity(4);
 
@@ -56,6 +59,7 @@ impl ScenePasses {
                     device,
                     layout,
                     format,
+                    samples,
                     PipelineKey {
                         shading: ShadingModel::Depth,
                         blend: BlendMode::Opaque,
@@ -72,6 +76,7 @@ impl ScenePasses {
                     device,
                     layout,
                     format,
+                    samples,
                     PipelineKey {
                         shading: ShadingModel::Outline,
                         blend: BlendMode::Opaque,
@@ -96,6 +101,7 @@ impl ScenePasses {
                 device,
                 layout,
                 format,
+                samples,
                 PipelineKey {
                     shading: ShadingModel::Toon,
                     blend: BlendMode::Opaque,
@@ -113,6 +119,7 @@ impl ScenePasses {
                 device,
                 layout,
                 format,
+                samples,
                 PipelineKey {
                     shading: ShadingModel::Toon,
                     blend: BlendMode::AlphaBlend,
