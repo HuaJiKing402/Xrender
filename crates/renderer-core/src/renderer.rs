@@ -1,6 +1,6 @@
 use std::{path::Path, time::Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use glam::{Mat3, Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
@@ -9,6 +9,7 @@ use crate::{
     backend::BACKEND_LABEL,
     camera::OrbitCamera,
     capture::FrameImage,
+    gpu::GpuContext,
     material::create_material_state,
     model::{
         texture::{self, TextureSlot},
@@ -77,12 +78,10 @@ struct TargetInfo {
     samples: u32,
 }
 
-/// 平台无关的渲染器：持有设备、管线与一帧的绘制计划，负责把画面呈现出去。
+/// 平台无关的渲染器：持有设备上下文、管线与一帧的绘制计划，负责把画面呈现出去。
 pub struct Renderer {
-    instance: wgpu::Instance,
-    adapter_name: String,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    /// 设备层：instance / adapter / device / queue 都从这里借。
+    gpu: GpuContext,
     /// 有窗口时才有 surface。无头模式下画面只落在 `scene_color` 上。
     surface: Option<wgpu::Surface<'static>>,
     config: Option<wgpu::SurfaceConfiguration>,
@@ -201,47 +200,27 @@ impl Renderer {
 
         let width = size.0.max(1);
         let height = size.1.max(1);
-        let adapter_count = instance.enumerate_adapters(backends).await.len();
-        if adapter_count == 0 {
-            return Err(anyhow!(
-                "no {} adapter found. Install or update your GPU driver.",
-                crate::backend::label(backends)
-            ));
-        }
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: surface.as_ref(),
-                ..Default::default()
-            })
-            .await
-            .context("failed to request a compatible GPU adapter")?;
-
-        let adapter_name = adapter.get_info().name;
-        log::info!("adapter: {adapter_name}");
 
         // 时间戳查询不是所有适配器都有；有才要，没有就走"不支持"分支。
-        // 在编码器里写时间戳需要额外 feature，这台机器有，就一并要上；
-        // 拿不到就退回 pass 级写法（见 measure_gpu_time）。
-        let adapter_features = adapter.features();
-        let timestamp_queries = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
-        let timestamp_in_encoders =
-            adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
-        let mut required_features = wgpu::Features::empty();
-        if timestamp_queries {
-            required_features |= wgpu::Features::TIMESTAMP_QUERY;
-            if timestamp_in_encoders {
-                required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        // 在编码器里写时间戳需要额外 feature，拿不到就只申请基础的查询能力。
+        let gpu = GpuContext::request(instance, backends, surface.as_ref(), |adapter| {
+            let available = adapter.features();
+            let mut features = wgpu::Features::empty();
+            if available.contains(wgpu::Features::TIMESTAMP_QUERY) {
+                features |= wgpu::Features::TIMESTAMP_QUERY;
+                if available.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+                    features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+                }
             }
-        }
+            features
+        })
+        .await?;
 
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                required_features,
-                ..Default::default()
-            })
-            .await
-            .context("failed to request GPU device")?;
+        // build 里大量资源创建都要 device / queue / adapter，这里取成本地别名；
+        // wgpu 的这些句柄内部是引用计数，clone 只是多一个句柄，不复制资源。
+        let device = gpu.device().clone();
+        let queue = gpu.queue().clone();
+        let adapter = gpu.adapter().clone();
 
         let gpu_timer = if device.features().contains(
             wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
@@ -548,10 +527,7 @@ impl Renderer {
         });
 
         Ok(Self {
-            instance,
-            adapter_name,
-            device,
-            queue,
+            gpu,
             surface,
             config,
             target: TargetInfo {
@@ -610,13 +586,13 @@ impl Renderer {
             format,
             samples,
         };
-        self.depth_texture = create_depth_texture(&self.device, width, height, samples);
+        self.depth_texture = create_depth_texture(self.gpu.device(), width, height, samples);
         self.depth_view = self
             .depth_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.scene_msaa = if samples > 1 {
             Some(create_scene_color(
-                &self.device,
+                self.gpu.device(),
                 width,
                 height,
                 format,
@@ -630,26 +606,29 @@ impl Renderer {
             .as_ref()
             .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
         self.scene_color = match self.scene_msaa.is_some() {
-            true => create_resolve_target(&self.device, width, height, format),
-            false => create_scene_color(&self.device, width, height, format, 1),
+            true => create_resolve_target(self.gpu.device(), width, height, format),
+            false => create_scene_color(self.gpu.device(), width, height, format, 1),
         };
         self.scene_color_view = self
             .scene_color
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("blit bind group"),
-            layout: &self.blit_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.scene_color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.blit_sampler),
-                },
-            ],
-        });
+        self.blit_bind_group = self
+            .gpu
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("blit bind group"),
+                layout: &self.blit_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.scene_color_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.blit_sampler),
+                    },
+                ],
+            });
     }
 
     pub fn resize(&mut self, size: (u32, u32)) {
@@ -664,12 +643,12 @@ impl Renderer {
             config.height = size.1;
         }
         if let (Some(surface), Some(config)) = (self.surface.as_ref(), self.config.as_ref()) {
-            surface.configure(&self.device, config);
+            surface.configure(self.gpu.device(), config);
         }
         self.recreate_targets(size.0, size.1);
         self.camera.set_viewport(size.0, size.1);
         if let Some(overlay) = &mut self.fps_overlay {
-            overlay.update(&self.queue, size, Instant::now());
+            overlay.update(self.gpu.queue(), size, Instant::now());
         }
     }
 
@@ -680,8 +659,12 @@ impl Renderer {
         let now = Instant::now();
         if let Some(overlay) = &mut self.fps_overlay {
             overlay.tick(now);
-            overlay.update(&self.queue, (self.target.width, self.target.height), now);
-            if let Err(error) = overlay.prepare(&self.device, &self.queue) {
+            overlay.update(
+                self.gpu.queue(),
+                (self.target.width, self.target.height),
+                now,
+            );
+            if let Err(error) = overlay.prepare(self.gpu.device(), self.gpu.queue()) {
                 log::warn!("{error:#}");
             }
         }
@@ -705,7 +688,8 @@ impl Renderer {
             view_rotation: view_rotation.to_cols_array_2d(),
             light: [MMD_DEFAULT_LIGHT, MMD_DEFAULT_LIGHT, MMD_DEFAULT_LIGHT, 1.0],
         };
-        self.queue
+        self.gpu
+            .queue()
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
 
@@ -824,13 +808,14 @@ impl Renderer {
     /// 由回读接口取走。
     pub fn render_offscreen(&mut self) -> Result<()> {
         self.prepare_frame();
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("offscreen frame encoder"),
-            });
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("offscreen frame encoder"),
+                });
         self.encode_scene(&mut encoder);
-        self.queue.submit(Some(encoder.finish()));
+        self.gpu.queue().submit(Some(encoder.finish()));
         Ok(())
     }
 
@@ -855,7 +840,7 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Outdated => {
                 if let (Some(surface), Some(config)) = (self.surface.as_ref(), self.config.as_ref())
                 {
-                    surface.configure(&self.device, config);
+                    surface.configure(self.gpu.device(), config);
                 }
                 let (width, height) = (self.target.width, self.target.height);
                 self.recreate_targets(width, height);
@@ -872,16 +857,17 @@ impl Renderer {
         let view_texture = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame encoder"),
-            });
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frame encoder"),
+                });
         self.encode_scene(&mut encoder);
         self.encode_blit(&mut encoder, &view_texture);
 
-        self.queue.submit(Some(encoder.finish()));
-        self.queue.present(frame);
+        self.gpu.queue().submit(Some(encoder.finish()));
+        self.gpu.queue().present(frame);
         Ok(())
     }
 
@@ -902,18 +888,19 @@ impl Renderer {
             .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let readback = self.gpu.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("scene readback"),
             size: (padded_bytes_per_row as u64) * (height as u64),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("scene readback encoder"),
-            });
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("scene readback encoder"),
+                });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.scene_color,
@@ -935,7 +922,7 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit(Some(encoder.finish()));
+        self.gpu.queue().submit(Some(encoder.finish()));
 
         let (sender, receiver) = std::sync::mpsc::channel();
         readback
@@ -943,7 +930,8 @@ impl Renderer {
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.send(result);
             });
-        self.device
+        self.gpu
+            .device()
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|error| anyhow!("waiting for the scene readback failed: {error:?}"))?;
         receiver
@@ -1000,11 +988,12 @@ impl Renderer {
 
         self.prepare_frame();
         let timer = self.gpu_timer.as_ref().expect("gpu timer checked above");
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("gpu timer encoder"),
-            });
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("gpu timer encoder"),
+                });
         // 用编码器级时间戳把整段场景包起来：不依赖某个 render pass 的首尾，
         // 后面加 pass 或换帧结构都不用改这里。
         encoder.write_timestamp(&timer.query_set, 0);
@@ -1012,7 +1001,7 @@ impl Renderer {
         encoder.write_timestamp(&timer.query_set, 1);
         encoder.resolve_query_set(&timer.query_set, 0..2, &timer.resolve, 0);
         encoder.copy_buffer_to_buffer(&timer.resolve, 0, &timer.readback, 0, 16);
-        self.queue.submit(Some(encoder.finish()));
+        self.gpu.queue().submit(Some(encoder.finish()));
 
         let (sender, receiver) = std::sync::mpsc::channel();
         timer
@@ -1021,7 +1010,8 @@ impl Renderer {
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.send(result);
             });
-        self.device
+        self.gpu
+            .device()
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|error| anyhow!("waiting for the timestamps failed: {error:?}"))?;
         receiver
@@ -1050,7 +1040,7 @@ impl Renderer {
         }
 
         // 时间戳是设备时钟的滴答数，乘上每滴答多少纳秒才是真实时间。
-        let period_ns = f64::from(self.queue.get_timestamp_period());
+        let period_ns = f64::from(self.gpu.queue().get_timestamp_period());
         let elapsed_ns = end.saturating_sub(begin) as f64 * period_ns;
         Ok(Some(std::time::Duration::from_secs_f64(
             elapsed_ns / 1_000_000_000.0,
@@ -1058,7 +1048,7 @@ impl Renderer {
     }
 
     pub fn adapter_name(&self) -> &str {
-        &self.adapter_name
+        self.gpu.adapter_name()
     }
 
     pub fn model_name(&self) -> &str {
@@ -1089,8 +1079,8 @@ impl Renderer {
     /// 返回 false 表示没有可用字体，此时不绘制文字。
     pub fn enable_fps_overlay(&mut self, font_path: Option<&Path>) -> bool {
         let overlay = FpsOverlay::new(
-            &self.device,
-            &self.queue,
+            self.gpu.device(),
+            self.gpu.queue(),
             self.target.format,
             (self.target.width, self.target.height),
             self.target.samples,
@@ -1130,7 +1120,7 @@ impl Renderer {
         if matrices.is_empty() {
             matrices.push(Mat4::IDENTITY);
         }
-        self.queue.write_buffer(
+        self.gpu.queue().write_buffer(
             &self.bone_buffer,
             0,
             bytemuck::cast_slice(&matrices_to_floats(&matrices)),
@@ -1138,6 +1128,6 @@ impl Renderer {
     }
 
     pub fn instance(&self) -> &wgpu::Instance {
-        &self.instance
+        self.gpu.instance()
     }
 }
