@@ -75,7 +75,7 @@ pub(crate) fn create_material_state(
             let mut sphere_view = textures.white_view().clone();
             match &material.shading {
                 ShadingData::Unlit => {}
-                ShadingData::Mmd(mmd) => {
+                ShadingData::Toon(toon) => {
                     ambient = material.ambient;
                     specular = [
                         material.specular[0],
@@ -83,18 +83,19 @@ pub(crate) fn create_material_state(
                         material.specular[2],
                         material.specular_strength,
                     ];
-                    sphere_mode = f32::from(mmd.sphere_mode);
-                    if let Some(slot) = textures.resolve_ramp(mmd.toon_reference, mmd.toon_index) {
+                    if let Some(slot) = toon.ramp.and_then(|ramp| textures.ramp_slot(ramp)) {
                         toon_view = slot.view.clone();
                         toon_code = slot.toon.code();
                     }
-                    if let Some(view) = mmd
-                        .sphere_index
-                        .and_then(|index| textures.diffuse_slot(index))
-                        .map(|slot| slot.view.clone())
-                    {
-                        sphere_view = view;
-                        sphere_enabled = true;
+                    if let Some(sphere) = toon.sphere {
+                        if let Some(view) = textures
+                            .diffuse_slot(sphere.index)
+                            .map(|slot| slot.view.clone())
+                        {
+                            sphere_view = view;
+                            sphere_mode = sphere.mode.code();
+                            sphere_enabled = true;
+                        }
                     }
                 }
             }

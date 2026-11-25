@@ -44,16 +44,64 @@ impl Default for OutlineStyle {
     }
 }
 
-/// 着色模型及其私有参数。
+/// 着色模型及其参数。
 ///
-/// 内核按枚举分发到对应的管线与材质绑定，不理解 toon / sphere 之类的细节；
-/// 换着色模型只是在这里加一个分支，不需要改 `renderer` / `material`。
+/// 内核按枚举分发到对应的管线与材质绑定；换着色模型只是在这里加一个分支，
+/// 不需要改 `renderer` / `material`。
 #[derive(Clone, Debug)]
 pub enum ShadingData {
-    /// 无光照扩展：贴图 × diffuse，不做 toon 斜坡。
+    /// 只算贴图 × diffuse 与环境/自发光，不压明暗。
     Unlit,
-    /// MMD 的 toon + sphere 体系。
-    Mmd(crate::mmd::MmdMaterial),
+    /// 卡通着色：一张 ramp 查找表压明暗，可选一张环境球贴图。
+    Toon(ToonParams),
+}
+
+/// 卡通着色参数。
+///
+/// 只说"用哪张 ramp、哪张环境球、怎么混合"，不说"这些索引是从模型的哪个字段
+/// 读出来的"——MMD 的 `toon_reference` 这类约定由装载方翻译成这里的字段。
+#[derive(Clone, Debug, Default)]
+pub struct ToonParams {
+    /// ramp 查找表；`None` 表示不压明暗（采样白色，乘上去等于不变）。
+    pub ramp: Option<RampSlot>,
+    /// 环境球贴图及其混合方式。
+    pub sphere: Option<SphereMap>,
+}
+
+/// ramp 贴图在贴图表里的位置。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RampSlot {
+    /// 模型自带贴图表里的第 n 张——有些模型直接拿漫反射图当 ramp。
+    Diffuse(usize),
+    /// 内置 ramp 表里的第 n 张。
+    Builtin(usize),
+}
+
+/// 环境球贴图。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SphereMap {
+    /// 模型自带贴图表里的索引。
+    pub index: usize,
+    pub mode: SphereMode,
+}
+
+/// 环境球混合方式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SphereMode {
+    /// 与当前颜色相乘。
+    Multiply,
+    /// 加到当前颜色上。
+    Add,
+}
+
+impl SphereMode {
+    /// 传给 shader 的编码：1 乘算、2 加算（与 wgsl 里的分支一致）。
+    pub fn code(self) -> f32 {
+        match self {
+            SphereMode::Multiply => 1.0,
+            SphereMode::Add => 2.0,
+        }
+    }
 }
 
 /// 通用材质：与模型格式无关的字段 + 一个着色模型扩展槽。

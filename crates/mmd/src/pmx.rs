@@ -1,7 +1,40 @@
 use anyhow::{bail, Context, Result};
 use renderer_core::model::{
-    Bone, MaterialGroup, MaterialProfile, Mesh, MeshVertex, OutlineStyle, ShadingData,
+    texture::BUILTIN_RAMP_COUNT, Bone, MaterialGroup, MaterialProfile, Mesh, MeshVertex,
+    OutlineStyle, RampSlot, ShadingData, SphereMap, SphereMode, ToonParams,
 };
+
+/// 把 PMX 的 toon / sphere 字段翻译成通用的卡通着色参数。
+///
+/// 这些是 MMD 自己的约定，所以放在装载器里而不是内核里：
+/// - `toon_index < 0` 表示该材质根本没有 toon，回落成白色乘数（不压暗）。
+/// - `toon_reference == 0` 时索引指向模型贴图表，有些模型直接拿漫反射图当 ramp。
+/// - `toon_reference == 1` 时指向内置 toon01–10，越界时退到第一张。
+/// - sphere 索引为负表示没有环境球；混合方式 1 乘算、2 加算，其余视为关闭。
+pub fn toon_params(
+    toon_reference: u8,
+    toon_index: i32,
+    environment_index: i64,
+    sphere_mode: u8,
+) -> ToonParams {
+    let ramp = if toon_index < 0 {
+        None
+    } else if toon_reference == 0 {
+        Some(RampSlot::Diffuse(toon_index as usize))
+    } else {
+        let index = (toon_index as usize).min(BUILTIN_RAMP_COUNT.saturating_sub(1));
+        Some(RampSlot::Builtin(index))
+    };
+    let sphere = usize::try_from(environment_index).ok().and_then(|index| {
+        let mode = match sphere_mode {
+            1 => SphereMode::Multiply,
+            2 => SphereMode::Add,
+            _ => return None,
+        };
+        Some(SphereMap { index, mode })
+    });
+    ToonParams { ramp, sphere }
+}
 
 struct Reader<'a> {
     data: &'a [u8],
@@ -301,18 +334,17 @@ pub fn load_pmx(bytes: &[u8], name: &str) -> Result<Mesh> {
             specular,
             specular_strength,
             texture_index: usize::try_from(texture_index).ok(),
-            // PMX 的描边开关是 flags & 0x10；其余标志位留给 MmdMaterial。
+            // PMX 的描边开关是 flags & 0x10；其余标志位（双面等）暂未使用。
             outline: (flags & 0x10 != 0).then_some(OutlineStyle {
                 color: edge_color,
                 scale: edge_scale,
             }),
-            shading: ShadingData::Mmd(renderer_core::mmd::MmdMaterial {
+            shading: ShadingData::Toon(toon_params(
                 toon_reference,
                 toon_index,
-                sphere_index: usize::try_from(environment_index).ok(),
+                environment_index,
                 sphere_mode,
-                flags,
-            }),
+            )),
         });
         groups.push(MaterialGroup {
             material_index,

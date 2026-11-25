@@ -5,7 +5,6 @@ pub mod capture;
 mod fps;
 pub mod gpu;
 mod material;
-pub mod mmd;
 pub mod model;
 mod overlay;
 mod pass;

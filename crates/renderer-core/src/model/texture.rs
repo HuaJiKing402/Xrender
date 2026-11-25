@@ -6,6 +6,8 @@ use std::{
 use anyhow::Result;
 use wgpu::{Device, Queue, Texture, TextureView};
 
+use super::RampSlot;
+
 /// 已上传到 GPU 的材质贴图。
 pub struct TextureSlot {
     pub label: String,
@@ -187,6 +189,9 @@ const BUILTIN_TOON: [&[u8]; 10] = [
     include_bytes!("../../assets/toon/toon09.bmp"),
     include_bytes!("../../assets/toon/toon10.bmp"),
 ];
+
+/// 内置 ramp 表的张数（MMD 的 toon01–toon10）。
+pub const BUILTIN_RAMP_COUNT: usize = BUILTIN_TOON.len();
 
 /// 官方 toon 的采样排布：纵向渐变、白色在上半（图像 y=0），暗端在下半。
 ///
@@ -442,20 +447,14 @@ impl TextureTable {
         &self.white.view
     }
 
-    /// 按 MMD 的两个字段挑 ramp：`reference == 0` 指漫反射表里的图当 ramp，
-    /// 其余指内置 ramp 表；`index < 0` 表示该材质没有 toon，返回 `None`，
-    /// 调用方保留白色贴图——采样得到 1.0，既不改变颜色也不产生阴影。
-    /// 索引越界同样按"无 ramp"处理，避免错拿别的贴图。
-    pub fn resolve_ramp(&self, reference: u8, index: i32) -> Option<&TextureSlot> {
-        if index < 0 {
-            return None;
-        }
-        let index = index as usize;
-        if reference == 0 {
-            self.diffuse.get(index)
-        } else {
-            // 内置 ramp 表越界时退到第一张作为兜底。
-            self.ramps.get(index).or_else(|| self.ramps.first())
+    /// 按 [RampSlot] 取 ramp 贴图；越界返回 `None`，调用方保留白色贴图。
+    ///
+    /// `Builtin` 型越界时退到第一张作为兜底，避免整片材质因为没有 ramp 而失去阴影
+    /// 层次；`Diffuse` 型越界则视为"无 ramp"，不去猜别的贴图。
+    pub fn ramp_slot(&self, slot: RampSlot) -> Option<&TextureSlot> {
+        match slot {
+            RampSlot::Diffuse(index) => self.diffuse.get(index),
+            RampSlot::Builtin(index) => self.ramps.get(index).or_else(|| self.ramps.first()),
         }
     }
 }
