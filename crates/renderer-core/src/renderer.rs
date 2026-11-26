@@ -1,8 +1,7 @@
 use std::{path::Path, time::Instant};
 
 use anyhow::{anyhow, Result};
-use glam::{Mat3, Mat4, Vec3};
-use wgpu::util::DeviceExt;
+use glam::{Mat3, Mat4};
 
 use crate::{
     animation::AnimationClip,
@@ -10,43 +9,23 @@ use crate::{
     camera::OrbitCamera,
     capture::FrameImage,
     gpu::GpuContext,
-    material::create_material_state,
-    model::{texture::TextureTable, Bone, Mesh},
+    model::Mesh,
     overlay::FpsOverlay,
     pass::{PassDraw, ScenePasses},
     pipeline::PipelineCache,
     renderer_helpers::{
         blit_bind_group_layout, create_blit_pipeline, create_depth_texture, create_resolve_target,
-        create_scene_color, draw_opaque_groups, draw_outline_groups,
-        draw_transparent_groups_ordered, group_centers, transparent_order,
+        create_scene_color,
     },
-    skinning::{compute_bone_matrices, Pose},
+    scene::{transparent_draw_order, validate_mesh, FrameUniforms, GpuMesh, Instance},
+    skinning::Pose,
 };
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
-    mvp: [[f32; 4]; 4],
-    model: [[f32; 4]; 4],
-    camera_position: [f32; 4],
-    /// 只有 toon.wgsl 读取（sphere map 需要在相机空间算反射）。
-    view_rotation: [[f32; 4]; 4],
-    /// 方向光颜色 × 强度；rgb 参与漫反射，a 预留。将来接 VMD 灯光帧时改这里。
-    light: [f32; 4],
-}
 
 /// MMD 原生方向光的默认强度：diffuse 先乘它，再与 ambient 相加。
 ///
 /// 不做这一项时 `diffuse(1.0) + ambient(0.5)` 会超过 1，亮面被 clamp 削平，
 /// toon 阴影也失去可见度。
 const MMD_DEFAULT_LIGHT: f32 = 0.6;
-
-fn matrices_to_floats(matrices: &[Mat4]) -> Vec<f32> {
-    matrices
-        .iter()
-        .flat_map(|matrix| matrix.to_cols_array())
-        .collect()
-}
 
 /// 时间戳查询需要的缓冲区：一个接时间戳解析结果，一个给 CPU 映射读回。
 ///
@@ -86,21 +65,18 @@ pub struct Renderer {
     pipelines: PipelineCache,
     /// 本帧的 pass 计划：顺序与每步的管线、绘制范围都在这里。
     scene_passes: ScenePasses,
-    bind_group: wgpu::BindGroup,
-    uniform_buffer: wgpu::Buffer,
-    bone_buffer: wgpu::Buffer,
-    bones: Vec<Bone>,
-    animation: Option<AnimationClip>,
-    material_bind_groups: Vec<wgpu::BindGroup>,
-    material_transparent: Vec<bool>,
-    material_outline: Vec<bool>,
-    /// 模型装载后留在 GPU 上的全部贴图（漫反射 + ramp + 白色兜底）。
-    textures: TextureTable,
-    // 由 material bind group 持有，但 Rust 侧无需再次读取
-    #[allow(dead_code)]
+    /// 管线布局：group 0 每对象、group 1 材质；加新网格要重建 pass 计划时用得上。
+    pipeline_layout: wgpu::PipelineLayout,
+    /// group 0 的布局：每对象 uniform + 骨骼矩阵。
+    object_layout: wgpu::BindGroupLayout,
+    /// group 1 的布局：材质 uniform 与贴图。
+    material_layout: wgpu::BindGroupLayout,
+    /// 场景里的网格资源；实例按下标引用，同模多实例只上传一次几何。
+    meshes: Vec<GpuMesh>,
+    /// 场景里的实例；不透明分组按这个顺序画，透明分组另按距离排序。
+    instances: Vec<Instance>,
     sampler: wgpu::Sampler,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
+    ramp_sampler: wgpu::Sampler,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
     /// 场景颜色先画到这里，再由 blit pass 搬到 surface。
@@ -117,10 +93,6 @@ pub struct Renderer {
     /// 设备支持时间戳查询时才有值。
     gpu_timer: Option<GpuTimer>,
     camera: OrbitCamera,
-    groups: Vec<crate::model::MaterialGroup>,
-    group_centers: Vec<Vec3>,
-    index_count: u32,
-    model_name: String,
     start: Instant,
 }
 
@@ -188,12 +160,7 @@ impl Renderer {
         mesh: Mesh,
         texture_base_dir: &Path,
     ) -> Result<Self> {
-        if !mesh.indices.len().is_multiple_of(3) {
-            return Err(anyhow!("mesh index count must be a multiple of 3"));
-        }
-        if mesh.indices.is_empty() {
-            return Err(anyhow!("mesh has no indices"));
-        }
+        validate_mesh(&mesh)?;
 
         let width = size.0.max(1);
         let height = size.1.max(1);
@@ -282,25 +249,9 @@ impl Renderer {
         }
         log::info!("scene target: {format:?}, {samples}x samples");
 
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mesh uniforms"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut identity_bones = compute_bone_matrices(&mesh.bones, &Pose::default());
-        if identity_bones.is_empty() {
-            identity_bones.push(Mat4::IDENTITY);
-        }
-        let bone_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("bone matrices"),
-            contents: bytemuck::cast_slice(&matrices_to_floats(&identity_bones)),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let global_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("mesh bind group layout"),
+        // 绑定布局与采样器是全场景共用的；网格资源与实例各自持有自己的 GPU 数据。
+        let object_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("object bind group layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -321,20 +272,6 @@ impl Renderer {
                         min_binding_size: None,
                     },
                     count: None,
-                },
-            ],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mesh bind group"),
-            layout: &global_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: bone_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -421,30 +358,27 @@ impl Renderer {
             ],
         });
 
-        let textures = TextureTable::load(&device, &queue, texture_base_dir, &mesh.texture_paths)?;
-
-        let material_state = create_material_state(
+        // 第一份资源 + 它的第一个实例（单位变换）。
+        // "同模多实例"与"多网格"都是在这之后往 `meshes` / `instances` 里追加。
+        let first_mesh = GpuMesh::upload(
             &device,
+            &queue,
+            mesh,
+            texture_base_dir,
             &material_layout,
             &sampler,
             &ramp_sampler,
-            &textures,
-            &mesh.materials,
-        );
-        let material_bind_groups = material_state.bind_groups;
-        let material_transparent = material_state.transparent;
-        let material_outline = material_state.outline;
-
-        let group_centers = group_centers(&mesh.vertices, &mesh.indices, &mesh.groups);
+        )?;
+        let has_outline = first_mesh.has_outline();
+        let first_instance = Instance::new(&device, &object_layout, 0, &first_mesh, Mat4::IDENTITY);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh pipeline layout"),
-            bind_group_layouts: &[Some(&global_layout), Some(&material_layout)],
+            bind_group_layouts: &[Some(&object_layout), Some(&material_layout)],
             ..Default::default()
         });
 
         let mut pipelines = PipelineCache::new(&device);
-        let has_outline = material_outline.iter().any(|enabled| *enabled);
         let scene_passes = ScenePasses::build(
             &mut pipelines,
             &device,
@@ -454,16 +388,6 @@ impl Renderer {
             samples,
         );
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh vertices"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh indices"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
         let depth_texture = create_depth_texture(&device, width, height, samples);
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -522,18 +446,13 @@ impl Renderer {
             },
             pipelines,
             scene_passes,
-            bind_group,
-            uniform_buffer,
-            bone_buffer,
-            bones: mesh.bones,
-            animation: None,
-            material_bind_groups,
-            material_transparent,
-            material_outline,
-            textures,
+            pipeline_layout,
+            object_layout,
+            material_layout,
+            meshes: vec![first_mesh],
+            instances: vec![first_instance],
             sampler,
-            vertex_buffer,
-            index_buffer,
+            ramp_sampler,
             depth_texture,
             depth_view,
             scene_color,
@@ -551,12 +470,112 @@ impl Renderer {
                 camera.set_viewport(width, height);
                 camera
             },
-            groups: mesh.groups,
-            group_centers,
-            index_count: mesh.indices.len() as u32,
-            model_name: mesh.name,
             start: Instant::now(),
         })
+    }
+
+    /// 往场景里加一份网格资源，并为它建第一个实例。
+    ///
+    /// 返回新实例的编号。同一份资源可以再加实例（[`Self::add_instance`]），
+    /// 几何只上传一次。
+    ///
+    /// 若新网格带描边而当前 pass 计划里没有深度预通道，会重建 pass 计划
+    /// （管线都在缓存里，重建只是重新组装顺序，不会重复编译）。
+    pub fn add_mesh(
+        &mut self,
+        mesh: Mesh,
+        texture_base_dir: &Path,
+        transform: Mat4,
+    ) -> Result<usize> {
+        validate_mesh(&mesh)?;
+        let device = self.gpu.device();
+        let queue = self.gpu.queue();
+        let uploaded = GpuMesh::upload(
+            device,
+            queue,
+            mesh,
+            texture_base_dir,
+            &self.material_layout,
+            &self.sampler,
+            &self.ramp_sampler,
+        )?;
+
+        let mesh_index = self.meshes.len();
+        let instance = Instance::new(
+            device,
+            &self.object_layout,
+            mesh_index,
+            &uploaded,
+            transform,
+        );
+        let has_outline = uploaded.has_outline();
+        self.meshes.push(uploaded);
+        self.instances.push(instance);
+        if has_outline {
+            self.ensure_scene_passes();
+        }
+        Ok(self.instances.len() - 1)
+    }
+
+    /// 复制一份已有的资源，挂上独立变换——同模多实例不重复上传几何。
+    pub fn add_instance(&mut self, mesh: usize, transform: Mat4) -> Result<usize> {
+        let Some(resource) = self.meshes.get(mesh) else {
+            return Err(anyhow!("no mesh with index {mesh}"));
+        };
+        let device = self.gpu.device();
+        let instance = Instance::new(device, &self.object_layout, mesh, resource, transform);
+        self.instances.push(instance);
+        Ok(self.instances.len() - 1)
+    }
+
+    pub fn mesh_count(&self) -> usize {
+        self.meshes.len()
+    }
+
+    pub fn instance_count(&self) -> usize {
+        self.instances.len()
+    }
+
+    /// 改一个实例的变换；下一帧生效。
+    pub fn set_instance_transform(&mut self, instance: usize, transform: Mat4) -> Result<()> {
+        let Some(target) = self.instances.get_mut(instance) else {
+            return Err(anyhow!("no instance with index {instance}"));
+        };
+        target.set_transform(transform);
+        Ok(())
+    }
+
+    /// 给单个实例挂动画（`None` 表示回到静止姿态）；同模的另一实例不受影响。
+    pub fn set_instance_animation(
+        &mut self,
+        instance: usize,
+        clip: Option<AnimationClip>,
+    ) -> Result<()> {
+        let Some(target) = self.instances.get_mut(instance) else {
+            return Err(anyhow!("no instance with index {instance}"));
+        };
+        target.set_animation(clip);
+        Ok(())
+    }
+
+    /// 有描边材质时必须存在深度预通道；场景内容变了就按新内容重建 pass 计划。
+    fn ensure_scene_passes(&mut self) {
+        let has_outline = self.meshes.iter().any(GpuMesh::has_outline);
+        let expects_outline = self
+            .scene_passes
+            .iter()
+            .any(|pass| pass.label == "depth-prepass");
+        if has_outline == expects_outline {
+            return;
+        }
+        self.scene_passes = ScenePasses::build(
+            &mut self.pipelines,
+            self.gpu.device(),
+            &self.pipeline_layout,
+            self.target.format,
+            has_outline,
+            self.target.samples,
+        );
     }
 
     /// 尺寸变化时重建所有与分辨率绑定的目标：深度、离屏颜色、blit 绑定。
@@ -635,7 +654,7 @@ impl Renderer {
         }
     }
 
-    /// 刷新本帧的逐帧状态：FPS 文本、动画姿态、全局 uniforms。
+    /// 刷新本帧的逐帧状态：FPS 文本、各实例的动画姿态与每对象 uniforms。
     ///
     /// 有窗口与无头两条渲染路径共用这一段，它们只差最后往哪里提交。
     fn prepare_frame(&mut self) {
@@ -653,37 +672,36 @@ impl Renderer {
         }
 
         let elapsed = self.start.elapsed().as_secs_f32();
-        let pose = self
-            .animation
-            .as_ref()
-            .map(|clip| clip.sample(elapsed * 60.0, &self.bones));
-        if let Some(pose) = pose {
-            self.set_pose(&pose);
-        }
-        let model = Mat4::IDENTITY;
-        let mvp = self.camera.view_projection() * model;
         let eye = self.camera.eye();
-        let view_rotation = Mat4::from_mat3(Mat3::from_mat4(self.camera.view()));
-        let uniforms = Uniforms {
-            mvp: mvp.to_cols_array_2d(),
-            model: model.to_cols_array_2d(),
+        let view_projection = self.camera.view_projection();
+        let frame = FrameUniforms {
             camera_position: [eye.x, eye.y, eye.z, 1.0],
-            view_rotation: view_rotation.to_cols_array_2d(),
+            view_rotation: Mat4::from_mat3(Mat3::from_mat4(self.camera.view())).to_cols_array_2d(),
             light: [MMD_DEFAULT_LIGHT, MMD_DEFAULT_LIGHT, MMD_DEFAULT_LIGHT, 1.0],
         };
-        self.gpu
-            .queue()
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+
+        let queue = self.gpu.queue();
+        let meshes = &self.meshes;
+        for instance in &mut self.instances {
+            let Some(resource) = meshes.get(instance.mesh()) else {
+                continue;
+            };
+            // 只有绑定了动画的实例才重算骨骼；其余保持静止姿态，省掉一次全量变换。
+            let pose = instance
+                .animation()
+                .map(|clip| clip.sample(elapsed * 60.0, resource.bones()));
+            if let Some(pose) = pose {
+                instance.apply_pose(queue, resource.bones(), &pose);
+            }
+            instance.write_uniforms(queue, &frame, view_projection);
+        }
     }
 
     /// 把整帧场景画进离屏颜色目标（深度 prepass / 描边 / 不透明 / 透明 / FPS）。
     fn encode_scene(&self, encoder: &mut wgpu::CommandEncoder) {
-        let transparent_order = transparent_order(
-            &self.groups,
-            &self.group_centers,
-            &self.material_transparent,
-            self.camera.eye(),
-        );
+        // 透明分组跨实例统一排序：一个实例的近处透明面必须排在另一个实例的远处透明面之后。
+        let transparent_draws =
+            transparent_draw_order(&self.meshes, &self.instances, self.camera.eye());
 
         // 开 MSAA 时画进多重采样目标，同时指定解析目标：本 pass 结束时
         // 硬件把多个样本平均进 `scene_color`，后面的 blit 与回读只看它。
@@ -725,32 +743,38 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         for scene_pass in self.scene_passes.iter() {
             log::trace!("scene pass: {}", scene_pass.label);
             pass.set_pipeline(self.pipelines.get(scene_pass.pipeline));
-            pass.set_bind_group(0, &self.bind_group, &[]);
             match scene_pass.draw {
-                PassDraw::OpaqueGroups => draw_opaque_groups(
-                    &mut pass,
-                    &self.groups,
-                    &self.material_bind_groups,
-                    &self.material_transparent,
-                ),
-                PassDraw::OutlineGroups => draw_outline_groups(
-                    &mut pass,
-                    &self.groups,
-                    &self.material_bind_groups,
-                    &self.material_outline,
-                    &self.material_transparent,
-                ),
-                PassDraw::TransparentGroupsOrdered => draw_transparent_groups_ordered(
-                    &mut pass,
-                    &self.groups,
-                    &self.material_bind_groups,
-                    &transparent_order,
-                ),
+                PassDraw::TransparentGroupsOrdered => {
+                    // 顺序是全局的，所以按 (实例, 分组) 直接画，不按实例分组循环。
+                    for &(instance_index, group_index) in &transparent_draws {
+                        let Some(instance) = self.instances.get(instance_index) else {
+                            continue;
+                        };
+                        let Some(mesh) = self.meshes.get(instance.mesh()) else {
+                            continue;
+                        };
+                        pass.set_bind_group(0, instance.bind_group(), &[]);
+                        mesh.bind(&mut pass);
+                        mesh.draw_transparent(&mut pass, &[group_index]);
+                    }
+                }
+                draw_kind => {
+                    for instance in &self.instances {
+                        let Some(mesh) = self.meshes.get(instance.mesh()) else {
+                            continue;
+                        };
+                        pass.set_bind_group(0, instance.bind_group(), &[]);
+                        mesh.bind(&mut pass);
+                        match draw_kind {
+                            PassDraw::OpaqueGroups => mesh.draw_opaque(&mut pass),
+                            PassDraw::OutlineGroups => mesh.draw_outline(&mut pass),
+                            PassDraw::TransparentGroupsOrdered => unreachable!("handled above"),
+                        }
+                    }
+                }
             }
         }
 
@@ -1034,28 +1058,49 @@ impl Renderer {
         self.gpu.adapter_name()
     }
 
+    /// 第一份网格资源名；多网格场景下用 [`Self::mesh_name`]。
     pub fn model_name(&self) -> &str {
-        &self.model_name
+        self.meshes
+            .first()
+            .map(GpuMesh::name)
+            .unwrap_or("(no mesh)")
     }
 
+    pub fn mesh_name(&self, mesh: usize) -> Option<&str> {
+        self.meshes.get(mesh).map(GpuMesh::name)
+    }
+
+    /// 场景里所有网格资源的三角形总数。
     pub fn triangle_count(&self) -> u32 {
-        self.index_count / 3
+        self.meshes.iter().map(GpuMesh::triangle_count).sum()
     }
 
+    /// 全部资源用到的不重复贴图数（同一张图被两份网格引用只算一次，
+    /// 但这里按"每个资源各算一份"计——资源之间本来就不共享贴图表）。
     pub fn texture_count(&self) -> usize {
-        self.textures.diffuse().len()
+        self.meshes
+            .iter()
+            .map(|mesh| mesh.textures().diffuse().len())
+            .sum()
     }
 
     pub fn toon_texture_count(&self) -> usize {
-        self.textures.ramps().len()
+        self.meshes
+            .first()
+            .map(|mesh| mesh.textures().ramps().len())
+            .unwrap_or(0)
     }
 
+    /// 第一份资源的骨骼数；骨骼是每个资源一份的。
     pub fn bone_count(&self) -> usize {
-        self.bones.len()
+        self.meshes.first().map(GpuMesh::bone_count).unwrap_or(0)
     }
 
+    /// 给第一个实例挂动画，兼容单模型场景的旧调用方式。
     pub fn set_animation(&mut self, clip: AnimationClip) {
-        self.animation = Some(clip);
+        if let Some(instance) = self.instances.first_mut() {
+            instance.set_animation(Some(clip));
+        }
     }
 
     /// 开启左上角 FPS 叠加；`font_path` 可指定 OpenType 字体文件。
@@ -1098,16 +1143,17 @@ impl Renderer {
         &self.camera
     }
 
+    /// 手动把一个姿态套到第一个实例上（动画之外的入口）。
+    ///
+    /// 想控制别的实例用 [`Self::set_instance_animation`] 或直接给该实例建动画。
     pub fn set_pose(&mut self, pose: &Pose) {
-        let mut matrices = compute_bone_matrices(&self.bones, pose);
-        if matrices.is_empty() {
-            matrices.push(Mat4::IDENTITY);
-        }
-        self.gpu.queue().write_buffer(
-            &self.bone_buffer,
-            0,
-            bytemuck::cast_slice(&matrices_to_floats(&matrices)),
-        );
+        let Some(instance) = self.instances.first() else {
+            return;
+        };
+        let Some(resource) = self.meshes.get(instance.mesh()) else {
+            return;
+        };
+        instance.apply_pose(self.gpu.queue(), resource.bones(), pose);
     }
 
     pub fn instance(&self) -> &wgpu::Instance {

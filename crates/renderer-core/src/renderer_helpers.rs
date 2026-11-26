@@ -1,6 +1,6 @@
 use wgpu::{
-    BindGroup, Device, RenderPass, Texture, TextureFormat, VertexAttribute, VertexBufferLayout,
-    VertexFormat, VertexStepMode,
+    Device, Texture, TextureFormat, VertexAttribute, VertexBufferLayout, VertexFormat,
+    VertexStepMode,
 };
 
 use glam::Vec3;
@@ -228,89 +228,6 @@ pub(crate) fn create_depth_texture(
     })
 }
 
-/// 绘制所有不透明材质分组。
-pub(crate) fn draw_opaque_groups<'a>(
-    pass: &mut RenderPass<'a>,
-    groups: &'a [MaterialGroup],
-    bind_groups: &'a [BindGroup],
-    material_transparent: &[bool],
-) {
-    for group in groups {
-        if group.index_count == 0 {
-            continue;
-        }
-        if material_transparent
-            .get(group.material_index)
-            .copied()
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        draw_group(pass, bind_groups, group);
-    }
-}
-
-/// 只绘制启用了描边、且整体不透明的材质分组。
-///
-/// 半透明材质如果也画描边，会在本体后面多出一层实色壳，看起来像脏边。
-pub(crate) fn draw_outline_groups<'a>(
-    pass: &mut RenderPass<'a>,
-    groups: &'a [MaterialGroup],
-    bind_groups: &'a [BindGroup],
-    material_outline: &[bool],
-    material_transparent: &[bool],
-) {
-    for group in groups {
-        if group.index_count == 0 {
-            continue;
-        }
-        if !material_outline
-            .get(group.material_index)
-            .copied()
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        if material_transparent
-            .get(group.material_index)
-            .copied()
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        draw_group(pass, bind_groups, group);
-    }
-}
-
-/// 按显式顺序绘制透明材质分组，调用方负责从远到近排序。
-pub(crate) fn draw_transparent_groups_ordered<'a>(
-    pass: &mut RenderPass<'a>,
-    groups: &'a [MaterialGroup],
-    bind_groups: &'a [BindGroup],
-    order: &[usize],
-) {
-    for &index in order {
-        let Some(group) = groups.get(index) else {
-            continue;
-        };
-        if group.index_count == 0 {
-            continue;
-        }
-        draw_group(pass, bind_groups, group);
-    }
-}
-
-fn draw_group(pass: &mut RenderPass<'_>, bind_groups: &[BindGroup], group: &MaterialGroup) {
-    if let Some(bind_group) = bind_groups.get(group.material_index) {
-        pass.set_bind_group(1, bind_group, &[]);
-    }
-    pass.draw_indexed(
-        group.index_start as u32..(group.index_start + group.index_count) as u32,
-        0,
-        0..1,
-    );
-}
-
 /// 计算每个材质分组的世界空间近似中心，用于透明排序。
 pub(crate) fn group_centers(
     vertices: &[MeshVertex],
@@ -336,32 +253,6 @@ pub(crate) fn group_centers(
             }
         })
         .collect()
-}
-
-/// 透明分组按相机距离从远到近排序。
-pub(crate) fn transparent_order(
-    groups: &[MaterialGroup],
-    centers: &[Vec3],
-    material_transparent: &[bool],
-    eye: Vec3,
-) -> Vec<usize> {
-    let mut order: Vec<usize> = groups
-        .iter()
-        .enumerate()
-        .filter(|(_, group)| {
-            material_transparent
-                .get(group.material_index)
-                .copied()
-                .unwrap_or(false)
-        })
-        .map(|(index, _)| index)
-        .collect();
-    order.sort_by(|&a, &b| {
-        let distance_a = (centers[a] - eye).length_squared();
-        let distance_b = (centers[b] - eye).length_squared();
-        distance_b.total_cmp(&distance_a)
-    });
-    order
 }
 
 #[cfg(test)]

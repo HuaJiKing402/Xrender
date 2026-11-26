@@ -11,6 +11,7 @@ mod pass;
 mod pipeline;
 pub mod renderer;
 mod renderer_helpers;
+mod scene;
 pub mod skinning;
 
 pub use camera::OrbitCamera;
