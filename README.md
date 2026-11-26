@@ -25,7 +25,8 @@ MMD（PMX / VMD）是第一个完整接入的格式与着色模型；它的专�
 | 离屏渲染 | ✅ | 场景画到 `scene_color`，再由全屏三角形 blit 到 surface |
 | MSAA | ⚠️ | 场景目标按格式特性取 4x→2x→单采样；深度附件跟不上就整体退回 1。后处理与阴影仍未实现 |
 | 后处理 / 阴影 | ❌ | 均未实现 |
-| 多模型 / 场景树 | ❌ | `Renderer` 只持一份网格 |
+| 多模型 / 多实例 | ✅ | `GpuMesh` 资源 + `Instance` 实例，每实例自带 model 矩阵；同模多实例共享几何 |
+| 场景图 / 父子层级 | ❌ | 实例是平铺列表，没有节点树、没有父变换继承 |
 | 无头渲染 | ✅ | `Renderer::new_headless` + `render_offscreen`，不需要窗口与交换链 |
 | 画面读回 / 截图 | ✅ | `read_scene_rgba` 返回 RGBA8，`capture_png` 直接落盘 |
 | 画面回归测试 | ✅ | `tests/golden.rs`，基线图在 `tests/golden/` |
@@ -104,7 +105,8 @@ pwsh -File scripts/check.ps1 -UpdateGolden  # 改了着色后重生成基线图
 | 格式 | `cargo fmt --all --check` | 有差异即失败 |
 | Lint | `cargo clippy --workspace --all-targets -- -D warnings` | 任何 warning 即失败 |
 | 构建 | `cargo build --workspace` | — |
-| 单元/集成 | `cargo test --workspace` | 28 个测试 |
+| 单元/集成 | `cargo test --workspace` | 39 个测试 |
+| 多实例 | `cargo test -p renderer-core --test scene` | 加实例/加网格后画面必须多出内容，错下标必须报错 |
 | 画面回归 | `cargo test -p renderer-core --test golden` | 平均通道差 ≤ 3，且单像素差 > 8 的占比 ≤ 1% |
 
 黄金图的基线是仓库里提交的 PNG（`tests/golden/`），由无头渲染生成：320×240、默认轨道相机再偏转成三分之四视角。改了着色确实该变画面时，用 `-UpdateGolden` 重生成，并把新图和代码一起提交、在提交信息里写清为什么变。
@@ -167,7 +169,7 @@ pwsh -File scripts/check.ps1 -UpdateGolden  # 改了着色后重生成基线图
 
 | crate | 职责 | 关键文件 |
 |---|---|---|
-| `renderer-core` | 平台无关内核：设备、surface、管线、材质、pass、帧呈现 | `gpu.rs`、`renderer.rs`、`pass.rs`、`pipeline.rs`、`material.rs`、`renderer_helpers.rs` |
+| `renderer-core` | 平台无关内核：设备、surface、场景、管线、材质、pass、帧呈现 | `gpu.rs`、`scene.rs`、`renderer.rs`、`pass.rs`、`pipeline.rs`、`material.rs`、`renderer_helpers.rs` |
 | `mmd` | MMD 资源层：PMX / VMD 解析 | `pmx.rs`、`vmd.rs` |
 | `app-desktop` | `winit` 窗口、输入、帧循环 | `main.rs` |
 | `app-web` | wasm32 + canvas | `lib.rs` |
@@ -184,13 +186,14 @@ pwsh -File scripts/check.ps1 -UpdateGolden  # 改了着色后重生成基线图
 
 一帧的流程：
 
-1. **CPU 准备**：采样动画 → 计算骨骼矩阵（622 骨约 40 KB）→ 写全局 uniform（MVP / model / 相机位置 / 视图旋转矩阵）→ 透明分组从远到近排序。
+1. **CPU 准备**：对每个实例——绑定了动画的采样姿态并算骨骼矩阵（622 骨约 40 KB）→ 写入该实例的每对象 uniform（MVP / model，相机位置与光照全帧共享）→ 透明分组跨实例按距相机的距离从远到近排一遍。
 2. **场景 pass**（颜色目标是离屏 `scene_color`，与 surface 同格式；开了 MSAA 时先画进多采样目标 `scene_msaa`，pass 结束后 resolve 到 `scene_color`）：
    - `depth-prepass`：只在场景存在描边材质时构建。写深度、不写颜色，`Less`。
    - `outline`：`cull Front`，只测不写深度。跳过半透明材质。
    - `opaque`：有 prepass 时只测不写；没有 prepass 时自己写深度（`Less`）。
-   - `transparent`：`ALPHA_BLENDING`，按材质组顺序绘制。
+   - `transparent`：`ALPHA_BLENDING`，按上一步排好的 (实例, 分组) 顺序绘制。
    - FPS 叠加：`glyphon`，在同一个 pass 末尾用 `depth Always` 绘制。
+   每个实例绘制前换一次 group 0（它自己的 uniform 与骨骼）与顶点/索引绑定，材质分组仍按 group 1 逐段切换。
 3. **blit pass**：全屏三角形把 `scene_color` 搬到 surface，1:1 采样，视觉结果与直画表面一致。
 
 有窗口与无头两条路径共用同一段场景编码：`prepare_frame`（FPS 文本、动画姿态、uniforms）→ `encode_scene` → 有 surface 时再 `encode_blit`。无头模式停在 `encode_scene`，颜色留在 `scene_color` 里等回读；`capture_png` 就是"渲染一帧 → 读回 → 写盘"。
@@ -199,12 +202,12 @@ pass 的顺序、管线 key 和绘制范围由 `pass::ScenePasses` 描述，`ren
 
 绑定布局：
 
-| 组 | 内容 |
-|---|---|
-| `group 0` | 全局 uniform（208 B）+ 骨骼矩阵 storage buffer |
-| `group 1` | 材质 uniform（80 B）+ diffuse 贴图/采样器 + toon 贴图 + sphere 贴图 + ramp 采样器 |
+| 组 | 内容 | 归属 |
+|---|---|---|
+| `group 0` | 每对象 uniform（MVP / model，208 B）+ 骨骼矩阵 storage buffer | 每个实例一份 |
+| `group 1` | 材质 uniform（80 B）+ diffuse 贴图/采样器 + toon 贴图 + sphere 贴图 + ramp 采样器 | 每份网格资源一份 |
 
-顶点格式 76 字节：`position` / `normal` / `color` / `uv` + 4×`u32` 骨骼索引 + 4×`f32` 权重。
+顶点格式 76 字节：`position` / `normal` / `color` / `uv` + 4×`u32` 骨骼索引 + 4×`f32` 权重。顶点与索引 buffer 属于 `GpuMesh`，同模多实例共用。
 
 ---
 
@@ -237,11 +240,11 @@ pass 的顺序、管线 key 和绘制范围由 `pass::ScenePasses` 描述，`ren
 4. 颜色空间规则不统一：贴图按 sRGB 解码，材质色与顶点色当线性值直接用。
 5. 贴图无 mipmap、无压缩格式；14 张 800×800 在 debug 下启动约 9 秒。
 6. MSAA 只在场景目标上开（4x→2x→关，由颜色格式特性决定）；blit 到 surface 仍是单采样，不改变最终呈现的采样数。
-7. 单网格渲染，`model` 矩阵恒为单位阵；多模型需要重构。
+7. 每个实例一份 uniform buffer 与一个 group 0 绑定；实例上千时这部分开销随实例数线性增长，下一步是把每对象数据并进一张 storage buffer，用索引或动态 offset 取。
 8. 每个材质一个 uniform buffer 与一个 bind group，材质数量上升后绑定开销线性增长。
 9. `cull Front` 对 PMX 双面薄片（`flags & 0x01`）无效，需要按材质分流管线。
 10. Web / Android / iOS 均未在本机验证。
-11. `Renderer` 仍是二十多个字段的大对象；`GpuContext` 与贴图表已经拆出去，多网格与资源句柄还没做。`docs/` 全部滞后于代码。
+11. 实例是平铺列表：没有父子层级、没有视锥剔除、没有 LOD。`docs/` 全部滞后于代码。
 12. GPU 计时在本机（RX 5700 XT / Vulkan）读回恒为 0，接口对外报「不可用」；换设备或驱动才能拿到真实数字。
 13. 黄金图基线是本机生成的，跨驱动的容差（平均差 3）刻意放宽，因此它对 1~2 级的颜色偏移不敏感。
 
@@ -252,7 +255,7 @@ pass 的顺序、管线 key 和绘制范围由 `pass::ScenePasses` 描述，`ren
 | 里程碑 | 版本 | 主题 | 核心交付 | 状态 |
 |---|---|---|---|---|
 | M0 | v0.8.0 | 可验证性 | 离屏读回、黄金图回归、`check` 脚本、GPU 计时 | **代码完成**（未打 tag） |
-| M1 | v0.9.0 | 内核与资源分层 | `GpuContext`、资源句柄、多网格、完成 MMD 剥离 | 进行中：设备上下文、贴图表、`ShadingData::Toon`、骨骼精简已落地；多网格未开始 |
+| M1 | v0.9.0 | 内核与资源分层 | `GpuContext`、资源句柄、多网格、完成 MMD 剥离 | **代码完成**（未打 tag） |
 | M2 | v0.10.0 | 帧图与渲染特性 | 渲染图、MSAA、tonemap + AA、颜色空间策略 | 未开始 |
 | M3 | v0.11.0 | 场景与光照 | 节点树、光源、阴影、剔除、材质变体 | 未开始 |
 | M4 | v0.12.0 | 资产与动画 | 异步加载、mipmap、压缩纹理、动画修正 | 未开始 |
